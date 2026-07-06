@@ -1,5 +1,7 @@
 # `bip388`
 
+[![crates.io](https://img.shields.io/crates/v/bip388.svg)](https://crates.io/crates/bip388)
+
 A `no_std`, allocator-backed Rust crate for parsing, serializing and
 **clear-signing** [BIP-388](https://github.com/bitcoin/bips/blob/master/bip-0388.mediawiki)
 wallet policies.
