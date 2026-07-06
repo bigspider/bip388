@@ -267,7 +267,7 @@ impl<'a> Iterator for DescriptorTemplateIter<'a> {
     type Item = (&'a KeyExpression, Option<&'a DescriptorTemplate>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.placeholders.len() > 0 || self.fragments.len() > 0 {
+        while !self.placeholders.is_empty() || !self.fragments.is_empty() {
             // If there are pending placeholders, pop and return one
             if let Some(item) = self.placeholders.pop() {
                 return Some(item);
@@ -501,19 +501,19 @@ impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
 impl DescriptorTemplate {
     /// Determines if root fragment is a wrapper.
     fn is_wrapper(&self) -> bool {
-        match &self {
-            DescriptorTemplate::A(_) => true,
-            DescriptorTemplate::S(_) => true,
-            DescriptorTemplate::C(_) => true,
-            DescriptorTemplate::T(_) => true,
-            DescriptorTemplate::D(_) => true,
-            DescriptorTemplate::V(_) => true,
-            DescriptorTemplate::J(_) => true,
-            DescriptorTemplate::N(_) => true,
-            DescriptorTemplate::L(_) => true,
-            DescriptorTemplate::U(_) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            DescriptorTemplate::A(_)
+                | DescriptorTemplate::S(_)
+                | DescriptorTemplate::C(_)
+                | DescriptorTemplate::T(_)
+                | DescriptorTemplate::D(_)
+                | DescriptorTemplate::V(_)
+                | DescriptorTemplate::J(_)
+                | DescriptorTemplate::N(_)
+                | DescriptorTemplate::L(_)
+                | DescriptorTemplate::U(_)
+        )
     }
     pub fn placeholders(&self) -> DescriptorTemplateIter<'_> {
         DescriptorTemplateIter::from(self)
@@ -715,8 +715,8 @@ fn parse_descriptor_template(input: &str) -> Result<DescriptorTemplate, ParseErr
 // Parses a derivation-step number like "44" or "44'".
 fn parse_derivation_step_number(input: &str) -> ParseResult<'_, u32> {
     let (rest, num) = parse_number_up_to(input, HARDENED_INDEX - 1)?;
-    if rest.starts_with('\'') {
-        Ok((&rest[1..], num + HARDENED_INDEX))
+    if let Some(rest) = rest.strip_prefix('\'') {
+        Ok((rest, num + HARDENED_INDEX))
     } else {
         Ok((rest, num))
     }
@@ -729,10 +729,9 @@ fn parse_derivation_suffix(input: &str) -> ParseResult<'_, (u32, u32)> {
     }
     let rest = &input[1..];
 
-    if rest.starts_with("**") {
-        Ok((&rest[2..], (0u32, 1u32)))
-    } else if rest.starts_with('<') {
-        let rest = &rest[1..];
+    if let Some(rest) = rest.strip_prefix("**") {
+        Ok((rest, (0u32, 1u32)))
+    } else if let Some(rest) = rest.strip_prefix('<') {
         let (rest, num1) = parse_derivation_step_number(rest)?;
         if !rest.starts_with(';') {
             return Err(ParseError::InvalidSyntax);
@@ -897,7 +896,7 @@ fn parse_inner_descriptor(
     if input.starts_with("thresh(") {
         return parse_thresh(input, ctx, depth);
     }
-    if input.starts_with("wsh(") {
+    if let Some(input) = input.strip_prefix("wsh(") {
         if !ctx.wsh_allowed() {
             return Err(ParseError::InvalidScriptContext);
         }
@@ -910,14 +909,14 @@ fn parse_inner_descriptor(
             _ => return Err(ParseError::InvalidScriptContext),
         };
 
-        let (rest, [script]) = parse_n_subscripts(&input[4..], inner_ctx, depth)?;
+        let (rest, [script]) = parse_n_subscripts(input, inner_ctx, depth)?;
         return Ok((rest, DescriptorTemplate::Wsh(Box::new(script))));
     }
-    if input.starts_with("sh(") {
+    if let Some(input) = input.strip_prefix("sh(") {
         if !ctx.sh_allowed() {
             return Err(ParseError::InvalidScriptContext);
         }
-        let (rest, [script]) = parse_n_subscripts(&input[3..], ParseContext::Legacy, depth)?;
+        let (rest, [script]) = parse_n_subscripts(input, ParseContext::Legacy, depth)?;
         return Ok((rest, DescriptorTemplate::Sh(Box::new(script))));
     }
     if input.starts_with("wpkh(") {
@@ -962,47 +961,47 @@ fn parse_inner_descriptor(
     if input.starts_with("hash160(") {
         return parse_hex20_fragment(input, "hash160", DescriptorTemplate::Hash160);
     }
-    if input.starts_with("andor(") {
-        let (rest, [x, y, z]) = parse_n_subscripts(&input[6..], ctx, depth)?;
+    if let Some(input) = input.strip_prefix("andor(") {
+        let (rest, [x, y, z]) = parse_n_subscripts(input, ctx, depth)?;
         return Ok((
             rest,
             DescriptorTemplate::Andor(Box::new(x), Box::new(y), Box::new(z)),
         ));
     }
-    if input.starts_with("and_b(") {
-        let (rest, [x, y]) = parse_n_subscripts(&input[6..], ctx, depth)?;
+    if let Some(input) = input.strip_prefix("and_b(") {
+        let (rest, [x, y]) = parse_n_subscripts(input, ctx, depth)?;
         return Ok((rest, DescriptorTemplate::And_b(Box::new(x), Box::new(y))));
     }
-    if input.starts_with("and_v(") {
-        let (rest, [x, y]) = parse_n_subscripts(&input[6..], ctx, depth)?;
+    if let Some(input) = input.strip_prefix("and_v(") {
+        let (rest, [x, y]) = parse_n_subscripts(input, ctx, depth)?;
         return Ok((rest, DescriptorTemplate::And_v(Box::new(x), Box::new(y))));
     }
-    if input.starts_with("and_n(") {
-        let (rest, [x, y]) = parse_n_subscripts(&input[6..], ctx, depth)?;
+    if let Some(input) = input.strip_prefix("and_n(") {
+        let (rest, [x, y]) = parse_n_subscripts(input, ctx, depth)?;
         return Ok((rest, DescriptorTemplate::And_n(Box::new(x), Box::new(y))));
     }
-    if input.starts_with("or_b(") {
-        let (rest, [x, y]) = parse_n_subscripts(&input[5..], ctx, depth)?;
+    if let Some(input) = input.strip_prefix("or_b(") {
+        let (rest, [x, y]) = parse_n_subscripts(input, ctx, depth)?;
         return Ok((rest, DescriptorTemplate::Or_b(Box::new(x), Box::new(y))));
     }
-    if input.starts_with("or_c(") {
-        let (rest, [x, y]) = parse_n_subscripts(&input[5..], ctx, depth)?;
+    if let Some(input) = input.strip_prefix("or_c(") {
+        let (rest, [x, y]) = parse_n_subscripts(input, ctx, depth)?;
         return Ok((rest, DescriptorTemplate::Or_c(Box::new(x), Box::new(y))));
     }
-    if input.starts_with("or_d(") {
-        let (rest, [x, y]) = parse_n_subscripts(&input[5..], ctx, depth)?;
+    if let Some(input) = input.strip_prefix("or_d(") {
+        let (rest, [x, y]) = parse_n_subscripts(input, ctx, depth)?;
         return Ok((rest, DescriptorTemplate::Or_d(Box::new(x), Box::new(y))));
     }
-    if input.starts_with("or_i(") {
-        let (rest, [x, y]) = parse_n_subscripts(&input[5..], ctx, depth)?;
+    if let Some(input) = input.strip_prefix("or_i(") {
+        let (rest, [x, y]) = parse_n_subscripts(input, ctx, depth)?;
         return Ok((rest, DescriptorTemplate::Or_i(Box::new(x), Box::new(y))));
     }
     // Simple terminals: bare "0" and "1"
-    if input.starts_with('0') {
-        return Ok((&input[1..], DescriptorTemplate::Zero));
+    if let Some(rest) = input.strip_prefix('0') {
+        return Ok((rest, DescriptorTemplate::Zero));
     }
-    if input.starts_with('1') {
-        return Ok((&input[1..], DescriptorTemplate::One));
+    if let Some(rest) = input.strip_prefix('1') {
+        return Ok((rest, DescriptorTemplate::One));
     }
     Err(ParseError::UnrecognizedFragment)
 }
@@ -1135,10 +1134,8 @@ fn parse_n_subscripts<const N: usize>(
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
-    let array: [DescriptorTemplate; N] = scripts
-        .try_into()
-        .ok()
-        .expect("loop pushed exactly N elements");
+    let array: [DescriptorTemplate; N] =
+        scripts.try_into().expect("loop pushed exactly N elements");
     Ok((&rest[1..], array))
 }
 
@@ -1204,8 +1201,8 @@ fn parse_thresh(
 fn parse_tr(input: &str, depth: usize) -> ParseResult<'_, DescriptorTemplate> {
     // input starts with "tr("
     let (rest, key_placeholder) = parse_key_expression(&input[3..], ParseContext::Taproot)?;
-    let (rest, tree) = if rest.starts_with(',') {
-        let (rest, tree) = parse_tap_tree(&rest[1..], depth)?;
+    let (rest, tree) = if let Some(rest) = rest.strip_prefix(',') {
+        let (rest, tree) = parse_tap_tree(rest, depth)?;
         (rest, Some(tree))
     } else {
         (rest, None)
@@ -1221,8 +1218,8 @@ fn parse_tap_tree(input: &str, depth: usize) -> ParseResult<'_, TapTree> {
         return Err(ParseError::NestingTooDeep);
     }
     let depth = depth + 1;
-    if input.starts_with('{') {
-        let (rest, left) = parse_tap_tree(&input[1..], depth)?;
+    if let Some(input) = input.strip_prefix('{') {
+        let (rest, left) = parse_tap_tree(input, depth)?;
         if !rest.starts_with(',') {
             return Err(ParseError::InvalidSyntax);
         }
@@ -1501,11 +1498,9 @@ impl WalletPolicy {
             }
         }
 
-        Ok(
-            WalletPolicy::new(&descriptor_template_str, key_information).map_err(|_| {
-                encode::Error::ParseFailed("Invalid descriptor template or key information")
-            })?,
-        )
+        WalletPolicy::new(&descriptor_template_str, key_information).map_err(|_| {
+            encode::Error::ParseFailed("Invalid descriptor template or key information")
+        })
     }
 
     pub fn get_segwit_version(&self) -> Result<SegwitVersion, ParseError> {
@@ -1847,8 +1842,8 @@ mod tests {
     use super::*;
 
     const H: u32 = HARDENED_INDEX;
-    const MAX_STEP: &'static str = "2147483647";
-    const MAX_STEP_H: &'static str = "2147483647'";
+    const MAX_STEP: &str = "2147483647";
+    const MAX_STEP_H: &str = "2147483647'";
 
     #[test]
     fn test_parse_derivation_step_number() {
@@ -1892,7 +1887,7 @@ mod tests {
         let test_cases_success = vec![
             (
                 "012345af/0'/1'/3",
-                make_key_origin_info(0x012345af, vec![0 + H, 1 + H, 3]),
+                make_key_origin_info(0x012345af, vec![H, 1 + H, 3]),
             ),
             (
                 "012345af/2147483647'/1'/3/6/7/42/12/54/23/56/89",
@@ -2050,7 +2045,7 @@ mod tests {
     #[test]
     fn test_wallet_policy() {
         let wallet = WalletPolicy::new(
-            &"sh(wsh(sortedmulti(2,@0/**,@1/**)))".to_string(),
+            "sh(wsh(sortedmulti(2,@0/**,@1/**)))",
             vec![
                 koi("[76223a6e/48'/1'/0'/1']tpubDE7NQymr4AFtcJXi9TaWZtrhAdy8QyKmT4U6b9qYByAxCzoyMJ8zw5d8xVLVpbTRAEqP8pVUxjLE2vDt1rSFjaiS8DSz1QcNZ8D1qxUMx1g"),
                 koi("[f5acc2fd/48'/1'/0'/1']tpubDFAqEGNyad35YgH8zxvxFZqNUoPtr5mDojs7wzbXQBHTZ4xHeVXG6w2HvsKvjBpaRpTmjYDjdPg5w2c6Wvu8QBkyMDrmBWdCyqkDM7reSsY"),
@@ -2488,9 +2483,7 @@ mod tests {
             .consensus_encode(&mut buf)
             .unwrap();
         let mut cursor = bitcoin::io::Cursor::new(buf);
-        let err = WalletPolicy::deserialize(&mut cursor)
-            .err()
-            .expect("expected error");
+        let err = WalletPolicy::deserialize(&mut cursor).expect_err("expected error");
         assert!(matches!(err, encode::Error::ParseFailed(_)));
     }
 
@@ -2505,9 +2498,7 @@ mod tests {
             .consensus_encode(&mut buf)
             .unwrap();
         let mut cursor = bitcoin::io::Cursor::new(buf);
-        let err = WalletPolicy::deserialize(&mut cursor)
-            .err()
-            .expect("expected error");
+        let err = WalletPolicy::deserialize(&mut cursor).expect_err("expected error");
         assert!(matches!(err, encode::Error::ParseFailed(_)));
     }
 

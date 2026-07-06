@@ -1532,8 +1532,8 @@ fn emit_score_arm(entry: &ProcessedEntry, class_enum: &str) -> TokenStream {
 
     let body: TokenStream = if musig == 0 {
         quote!(#plain)
-    } else if musig == 1 {
-        quote!(#plain + if *threshold as usize == keys.len() { 1 } else { 0 })
+    } else if plain == 0 {
+        quote!(if *threshold as usize == keys.len() { #musig } else { 0 })
     } else {
         quote!(#plain + if *threshold as usize == keys.len() { #musig } else { 0 })
     };
@@ -1675,6 +1675,7 @@ fn emit_from_cleartext_arm(
 fn emit_top_level_variants(top_level: &[ProcessedEntry]) -> TokenStream {
     let arms: Vec<TokenStream> = top_level.iter().map(emit_top_level_variants_arm).collect();
     quote! {
+        #[allow(clippy::vec_init_then_push)]
         fn top_level_variants(
             class: DescriptorClass,
         ) -> Result<alloc::boxed::Box<dyn Iterator<Item = DescriptorTemplate>>, CleartextDecodeError>
@@ -1762,7 +1763,7 @@ fn emit_subpolicy_construction_block(
         .map(|n| {
             let n_ident = id(n);
             let d_ident = format_ident!("{}_descs", n);
-            quote!(let #d_ident = tapleaf_to_descriptors(&**#n_ident)?;)
+            quote!(let #d_ident = tapleaf_to_descriptors(#n_ident)?;)
         })
         .collect();
 
@@ -1895,6 +1896,7 @@ fn emit_tapleaf_to_descriptors(tapleaf: &[ProcessedEntry]) -> TokenStream {
         })
         .collect();
     quote! {
+        #[allow(clippy::vec_init_then_push)]
         fn tapleaf_to_descriptors(
             leaf: &TapleafClass,
         ) -> Result<alloc::vec::Vec<DescriptorTemplate>, CleartextDecodeError> {
@@ -1935,6 +1937,17 @@ fn emit_internal_key_local(entry: &ProcessedEntry) -> TokenStream {
 /// one entry per applicable pattern. `owned` controls whether numeric fields
 /// are bound by value (`u32`) or by reference (`&u32`).
 fn emit_pattern_construction_block(entry: &ProcessedEntry, owned: bool) -> TokenStream {
+    if !entry.patterns.iter().any(pattern_uses_musig) {
+        // No conditional inserts: build the vec directly with the `vec![]` macro.
+        let exprs: Vec<TokenStream> = entry
+            .patterns
+            .iter()
+            .map(|pat| build_construction_expr(pat, owned))
+            .collect();
+        return quote! {
+            let __out: alloc::vec::Vec<DescriptorTemplate> = alloc::vec![#(#exprs),*];
+        };
+    }
     let pushes = entry.patterns.iter().map(|pat| {
         let expr = build_construction_expr(pat, owned);
         if pattern_uses_musig(pat) {

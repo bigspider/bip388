@@ -45,7 +45,7 @@ pub(super) fn parse_utc_date_to_timestamp(s: &str) -> Option<u32> {
     let y: i64 = dp[0].parse().ok()?;
     let m: u32 = dp[1].parse().ok()?;
     let d: u32 = dp[2].parse().ok()?;
-    if m < 1 || m > 12 || d < 1 || d > 31 {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         // does not account for days-per-month or leap years
         return None;
     }
@@ -122,10 +122,7 @@ pub(super) fn parse_relative_time_to_seconds(s: &str) -> Option<u32> {
     let mut total: u32 = 0;
     let mut last_unit: u8 = 0; // day=1, hour=2, minute=3, second=4; enforces ordering
     let mut tokens = s.split_ascii_whitespace();
-    loop {
-        let Some(num_str) = tokens.next() else {
-            break;
-        };
+    while let Some(num_str) = tokens.next() {
         // A number must be followed by a unit word.
         let unit_str = tokens.next()?;
         let n: u32 = num_str.parse().ok()?;
@@ -273,7 +270,10 @@ mod tests {
         assert_eq!(parse_relative_time_to_seconds("1 minute"), Some(60));
         assert_eq!(parse_relative_time_to_seconds("1 hour"), Some(3600));
         assert_eq!(parse_relative_time_to_seconds("1 day"), Some(86400));
-        assert_eq!(parse_relative_time_to_seconds("8 minutes 32 seconds"), Some(512));
+        assert_eq!(
+            parse_relative_time_to_seconds("8 minutes 32 seconds"),
+            Some(512)
+        );
         assert_eq!(
             parse_relative_time_to_seconds("1 day 1 hour 36 minutes"),
             Some(92160)
@@ -286,7 +286,10 @@ mod tests {
             parse_relative_time_to_seconds("1 day 2 hours 3 minutes 4 seconds"),
             Some(93784)
         );
-        assert_eq!(parse_relative_time_to_seconds("1 hour 1 second"), Some(3601));
+        assert_eq!(
+            parse_relative_time_to_seconds("1 hour 1 second"),
+            Some(3601)
+        );
         // Singular/plural spellings are interchangeable regardless of the number.
         assert_eq!(parse_relative_time_to_seconds("2 day"), Some(172800));
         assert_eq!(parse_relative_time_to_seconds("1 seconds"), Some(1));
