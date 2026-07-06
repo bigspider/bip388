@@ -1,7 +1,14 @@
 [package]
 name = "bip388"
 version = "0.1.0"
+authors = ["Salvatore Ingala <salvatoshi@protonmail.com>"]
 edition = "2021"
+description = "A no_std, allocator-backed Rust crate for parsing, serializing and clear-signing BIP-388 wallet policies."
+license = "Apache-2.0"
+repository = "https://github.com/bigspider/bip388"
+readme = "README.md"
+keywords = ["bitcoin", "bip388", "descriptor", "wallet-policy", "no_std"]
+categories = ["cryptography::cryptocurrencies", "no-std"]
 
 [features]
 default = []
