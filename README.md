@@ -171,7 +171,7 @@ repeat num_keys:
     78 bytes  serialized xpub
 ```
 
-This is the same serialization format used in the [Ledger Bitcoin app](https://github.com/LedgerHQ/app-bitcoin-new).
+This is the same serialization format used in the [Ledger Bitcoin app](https://github.com/LedgerHQ/app-bitcoin).
 
 `deserialize` is hardened against hostile input: every length is bounds-checked
 *before* allocation, and trailing bytes after a complete policy are rejected.
