@@ -1041,7 +1041,9 @@ fn parse_threshold_kp_fragment<'a>(
                 keys.push(kp);
                 rest = r;
             }
-            Err(ParseError::InvalidScriptContext) => return Err(ParseError::InvalidScriptContext),
+            // A hard script-context violation must propagate; only a "can't
+            // parse another key here" error (`Err(_)`) ends the key list.
+            Err(e @ ParseError::InvalidScriptContext) => return Err(e),
             Err(_) => break,
         }
     }
@@ -1118,9 +1120,8 @@ fn parse_thresh(
         return Err(ParseError::InvalidSyntax);
     }
     // parse first script (mandatory)
-    let (rest, first) = parse_descriptor(&rest[1..], ctx, depth)?;
+    let (mut rest, first) = parse_descriptor(&rest[1..], ctx, depth)?;
     let mut scripts = vec![first];
-    let mut rest = rest;
     loop {
         if !rest.starts_with(',') {
             break;
@@ -1130,7 +1131,9 @@ fn parse_thresh(
                 scripts.push(desc);
                 rest = r;
             }
-            Err(ParseError::NestingTooDeep) => return Err(ParseError::NestingTooDeep),
+            // A hard nesting-limit error must propagate; only a "can't parse
+            // another sub-script here" error (`Err(_)`) ends the list.
+            Err(e @ ParseError::NestingTooDeep) => return Err(e),
             Err(_) => break,
         }
     }
@@ -1357,13 +1360,10 @@ impl WalletPolicy {
 
         // test that the stream is indeed exhausted
         let mut buf = [0u8; 1];
-        match r.read(&mut buf)? {
-            0 => {}
-            _ => {
-                return Err(encode::Error::ParseFailed(
-                    "Extra data after deserializing WalletPolicy",
-                ));
-            }
+        if r.read(&mut buf)? != 0 {
+            return Err(encode::Error::ParseFailed(
+                "Extra data after deserializing WalletPolicy",
+            ));
         }
 
         WalletPolicy::new(&descriptor_template_str, key_information).map_err(|_| {
