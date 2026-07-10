@@ -857,41 +857,34 @@ fn parse_inner_descriptor(
     depth: usize,
 ) -> ParseResult<'_, DescriptorTemplate> {
     // Longer names checked before shorter to avoid premature prefix matches.
-    if input.starts_with("sortedmulti_a(") {
+    // Each `strip_prefix` consumes the keyword and its opening '(', so the
+    // fragment helpers receive the input positioned at the first argument.
+    if let Some(rest) = input.strip_prefix("sortedmulti_a(") {
         return parse_threshold_kp_fragment(
-            input,
-            "sortedmulti_a",
+            rest,
             DescriptorTemplate::Sortedmulti_a,
             ctx,
             MAX_KEYS_MULTI_A,
         );
     }
-    if input.starts_with("sortedmulti(") {
+    if let Some(rest) = input.strip_prefix("sortedmulti(") {
         return parse_threshold_kp_fragment(
-            input,
-            "sortedmulti",
+            rest,
             DescriptorTemplate::Sortedmulti,
             ctx,
             MAX_KEYS_MULTI,
         );
     }
-    if input.starts_with("multi_a(") {
+    if let Some(rest) = input.strip_prefix("multi_a(") {
         return parse_threshold_kp_fragment(
-            input,
-            "multi_a",
+            rest,
             DescriptorTemplate::Multi_a,
             ctx,
             MAX_KEYS_MULTI_A,
         );
     }
-    if input.starts_with("multi(") {
-        return parse_threshold_kp_fragment(
-            input,
-            "multi",
-            DescriptorTemplate::Multi,
-            ctx,
-            MAX_KEYS_MULTI,
-        );
+    if let Some(rest) = input.strip_prefix("multi(") {
+        return parse_threshold_kp_fragment(rest, DescriptorTemplate::Multi, ctx, MAX_KEYS_MULTI);
     }
     if input.starts_with("thresh(") {
         return parse_thresh(input, ctx, depth);
@@ -919,14 +912,14 @@ fn parse_inner_descriptor(
         let (rest, [script]) = parse_n_subscripts(input, ParseContext::Legacy, depth)?;
         return Ok((rest, DescriptorTemplate::Sh(Box::new(script))));
     }
-    if input.starts_with("wpkh(") {
+    if let Some(rest) = input.strip_prefix("wpkh(") {
         if !ctx.wpkh_allowed() {
             return Err(ParseError::InvalidScriptContext);
         }
-        return parse_kp_fragment(input, "wpkh", DescriptorTemplate::Wpkh, ctx);
+        return parse_kp_fragment(rest, DescriptorTemplate::Wpkh, ctx);
     }
-    if input.starts_with("pkh(") {
-        return parse_kp_fragment(input, "pkh", DescriptorTemplate::Pkh, ctx);
+    if let Some(rest) = input.strip_prefix("pkh(") {
+        return parse_kp_fragment(rest, DescriptorTemplate::Pkh, ctx);
     }
     if input.starts_with("tr(") {
         if !ctx.tr_allowed() {
@@ -934,32 +927,32 @@ fn parse_inner_descriptor(
         }
         return parse_tr(input, depth);
     }
-    if input.starts_with("pk_k(") {
-        return parse_kp_fragment(input, "pk_k", DescriptorTemplate::Pk_k, ctx);
+    if let Some(rest) = input.strip_prefix("pk_k(") {
+        return parse_kp_fragment(rest, DescriptorTemplate::Pk_k, ctx);
     }
-    if input.starts_with("pk_h(") {
-        return parse_kp_fragment(input, "pk_h", DescriptorTemplate::Pk_h, ctx);
+    if let Some(rest) = input.strip_prefix("pk_h(") {
+        return parse_kp_fragment(rest, DescriptorTemplate::Pk_h, ctx);
     }
-    if input.starts_with("pk(") {
-        return parse_kp_fragment(input, "pk", DescriptorTemplate::Pk, ctx);
+    if let Some(rest) = input.strip_prefix("pk(") {
+        return parse_kp_fragment(rest, DescriptorTemplate::Pk, ctx);
     }
-    if input.starts_with("older(") {
-        return parse_num_fragment(input, "older", MAX_OLDER_AFTER, DescriptorTemplate::Older);
+    if let Some(rest) = input.strip_prefix("older(") {
+        return parse_num_fragment(rest, MAX_OLDER_AFTER, DescriptorTemplate::Older);
     }
-    if input.starts_with("after(") {
-        return parse_num_fragment(input, "after", MAX_OLDER_AFTER, DescriptorTemplate::After);
+    if let Some(rest) = input.strip_prefix("after(") {
+        return parse_num_fragment(rest, MAX_OLDER_AFTER, DescriptorTemplate::After);
     }
-    if input.starts_with("sha256(") {
-        return parse_hex32_fragment(input, "sha256", DescriptorTemplate::Sha256);
+    if let Some(rest) = input.strip_prefix("sha256(") {
+        return parse_hex32_fragment(rest, DescriptorTemplate::Sha256);
     }
-    if input.starts_with("hash256(") {
-        return parse_hex32_fragment(input, "hash256", DescriptorTemplate::Hash256);
+    if let Some(rest) = input.strip_prefix("hash256(") {
+        return parse_hex32_fragment(rest, DescriptorTemplate::Hash256);
     }
-    if input.starts_with("ripemd160(") {
-        return parse_hex20_fragment(input, "ripemd160", DescriptorTemplate::Ripemd160);
+    if let Some(rest) = input.strip_prefix("ripemd160(") {
+        return parse_hex20_fragment(rest, DescriptorTemplate::Ripemd160);
     }
-    if input.starts_with("hash160(") {
-        return parse_hex20_fragment(input, "hash160", DescriptorTemplate::Hash160);
+    if let Some(rest) = input.strip_prefix("hash160(") {
+        return parse_hex20_fragment(rest, DescriptorTemplate::Hash160);
     }
     if let Some(input) = input.strip_prefix("andor(") {
         let (rest, [x, y, z]) = parse_n_subscripts(input, ctx, depth)?;
@@ -1006,82 +999,73 @@ fn parse_inner_descriptor(
     Err(ParseError::UnrecognizedFragment)
 }
 
-// Parses a named fragment that wraps a single key expression: name(@...)
+// Parses the body of a fragment that wraps a single key expression: `@...)`.
+// `input` is positioned just after the fragment's opening '('.
 fn parse_kp_fragment<'a>(
     input: &'a str,
-    name: &str,
     constructor: fn(KeyExpression) -> DescriptorTemplate,
     ctx: ParseContext,
 ) -> ParseResult<'a, DescriptorTemplate> {
-    let rest = &input[name.len()..]; // caller already checked starts_with(name)
-    let (rest, kp) = parse_key_expression(&rest[1..], ctx)?; // skip '('
+    let (rest, kp) = parse_key_expression(input, ctx)?;
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(kp)))
 }
 
-// Parses "name(n)" where n is a number <= max.
+// Parses "n)" where n is a number <= max. `input` is positioned just after '('.
 fn parse_num_fragment<'a>(
     input: &'a str,
-    name: &str,
     max: u32,
     constructor: fn(u32) -> DescriptorTemplate,
 ) -> ParseResult<'a, DescriptorTemplate> {
-    let rest = &input[name.len()..]; // caller already checked starts_with(name)
-    let (rest, num) = parse_number_up_to(&rest[1..], max)?; // skip '('
+    let (rest, num) = parse_number_up_to(input, max)?;
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(num)))
 }
 
-// Parses "name(<40 hex chars>)".
+// Parses "<40 hex chars>)". `input` is positioned just after '('.
 fn parse_hex20_fragment<'a>(
     input: &'a str,
-    name: &str,
     constructor: fn([u8; 20]) -> DescriptorTemplate,
 ) -> ParseResult<'a, DescriptorTemplate> {
-    let rest = &input[name.len() + 1..]; // skip name and '('
-    if rest.len() < 40 {
+    if input.len() < 40 {
         return Err(ParseError::InvalidLength);
     }
-    let bytes = <[u8; 20]>::from_hex(&rest[..40]).map_err(|_| ParseError::InvalidHex)?;
-    let rest = &rest[40..];
+    let bytes = <[u8; 20]>::from_hex(&input[..40]).map_err(|_| ParseError::InvalidHex)?;
+    let rest = &input[40..];
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(bytes)))
 }
 
-// Parses "name(<64 hex chars>)".
+// Parses "<64 hex chars>)". `input` is positioned just after '('.
 fn parse_hex32_fragment<'a>(
     input: &'a str,
-    name: &str,
     constructor: fn([u8; 32]) -> DescriptorTemplate,
 ) -> ParseResult<'a, DescriptorTemplate> {
-    let rest = &input[name.len() + 1..]; // skip name and '('
-    if rest.len() < 64 {
+    if input.len() < 64 {
         return Err(ParseError::InvalidLength);
     }
-    let bytes = <[u8; 32]>::from_hex(&rest[..64]).map_err(|_| ParseError::InvalidHex)?;
-    let rest = &rest[64..];
+    let bytes = <[u8; 32]>::from_hex(&input[..64]).map_err(|_| ParseError::InvalidHex)?;
+    let rest = &input[64..];
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(bytes)))
 }
 
-// Parses "name(threshold,<key1>,<key1>,...)".
+// Parses "threshold,<key1>,<key2>,...)". `input` is positioned just after '('.
 fn parse_threshold_kp_fragment<'a>(
     input: &'a str,
-    name: &str,
     constructor: fn(u32, Vec<KeyExpression>) -> DescriptorTemplate,
     ctx: ParseContext,
     max_keys: usize,
 ) -> ParseResult<'a, DescriptorTemplate> {
-    let rest = &input[name.len() + 1..]; // skip name and '('
-    let (mut rest, threshold) = parse_number_up_to(rest, u32::MAX)?;
+    let (mut rest, threshold) = parse_number_up_to(input, u32::MAX)?;
     let mut keys: Vec<KeyExpression> = Vec::new();
     loop {
         if !rest.starts_with(',') {
@@ -1150,9 +1134,11 @@ fn parse_wsh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
 
 #[cfg(test)]
 fn parse_sortedmulti(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+    let rest = input
+        .strip_prefix("sortedmulti(")
+        .ok_or(ParseError::InvalidSyntax)?;
     parse_threshold_kp_fragment(
-        input,
-        "sortedmulti",
+        rest,
         DescriptorTemplate::Sortedmulti,
         ParseContext::TopLevel,
         MAX_KEYS_MULTI,
