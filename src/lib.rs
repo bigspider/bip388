@@ -85,6 +85,19 @@ pub enum ParseError {
     InvalidMultisigQuorum,
     /// Descriptor template nesting exceeds [`MAX_PARSE_DEPTH`].
     NestingTooDeep,
+    /// The two multipath indices in `/<M;N>/*` are equal (they must be distinct).
+    NonDistinctMultipath,
+    /// A wallet policy has no key placeholders (at least one is required).
+    NoKeyPlaceholders,
+    /// The referenced key placeholders do not match the key information vector:
+    /// some index is unused, or the counts differ.
+    KeyIndexCountMismatch,
+    /// The key information vector contains duplicate public keys (they must be
+    /// pairwise distinct).
+    DuplicateKey,
+    /// The same key placeholder is used with overlapping multipath index sets
+    /// (`{M,N}` and `{P,Q}` must be disjoint).
+    OverlappingMultipath,
 }
 
 /// The parsing context, tracking which top-level descriptor we are inside.
@@ -126,6 +139,19 @@ impl ParseContext {
     /// `tr()` is only allowed at the top level.
     fn tr_allowed(self) -> bool {
         matches!(self, ParseContext::TopLevel)
+    }
+
+    /// `multi()`/`sortedmulti()` are only allowed inside `sh()` or `wsh()`.
+    fn multi_allowed(self) -> bool {
+        matches!(
+            self,
+            ParseContext::Legacy | ParseContext::Segwit | ParseContext::WrappedSegwit
+        )
+    }
+
+    /// `multi_a()`/`sortedmulti_a()` are tapscript-only, so allowed only inside `tr()`.
+    fn multi_a_allowed(self) -> bool {
+        matches!(self, ParseContext::Taproot)
     }
 }
 
@@ -696,6 +722,10 @@ fn parse_derivation_suffix(input: &str) -> ParseResult<'_, (u32, u32)> {
         if !rest.starts_with(">/*") {
             return Err(ParseError::InvalidSyntax);
         }
+        // BIP-388: the two numbers in `/<NUM;NUM>/*` must be distinct.
+        if num1 == num2 {
+            return Err(ParseError::NonDistinctMultipath);
+        }
         Ok((&rest[3..], (num1, num2)))
     } else {
         Err(ParseError::InvalidSyntax)
@@ -816,6 +846,9 @@ fn parse_inner_descriptor(
     // Each `strip_prefix` consumes the keyword and its opening '(', so the
     // fragment helpers receive the input positioned at the first argument.
     if let Some(rest) = input.strip_prefix("sortedmulti_a(") {
+        if !ctx.multi_a_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
         return parse_threshold_kp_fragment(
             rest,
             DescriptorTemplate::Sortedmulti_a,
@@ -824,6 +857,9 @@ fn parse_inner_descriptor(
         );
     }
     if let Some(rest) = input.strip_prefix("sortedmulti(") {
+        if !ctx.multi_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
         return parse_threshold_kp_fragment(
             rest,
             DescriptorTemplate::Sortedmulti,
@@ -832,6 +868,9 @@ fn parse_inner_descriptor(
         );
     }
     if let Some(rest) = input.strip_prefix("multi_a(") {
+        if !ctx.multi_a_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
         return parse_threshold_kp_fragment(
             rest,
             DescriptorTemplate::Multi_a,
@@ -840,6 +879,9 @@ fn parse_inner_descriptor(
         );
     }
     if let Some(rest) = input.strip_prefix("multi(") {
+        if !ctx.multi_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
         return parse_threshold_kp_fragment(rest, DescriptorTemplate::Multi, ctx, MAX_KEYS_MULTI);
     }
     if input.starts_with("thresh(") {
@@ -1095,10 +1137,12 @@ fn parse_sortedmulti(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     let rest = input
         .strip_prefix("sortedmulti(")
         .ok_or(ParseError::InvalidSyntax)?;
+    // `sortedmulti` is only valid inside `sh`/`wsh`; use a segwit context so
+    // this helper exercises the fragment as it would appear in a real policy.
     parse_threshold_kp_fragment(
         rest,
         DescriptorTemplate::Sortedmulti,
-        ParseContext::TopLevel,
+        ParseContext::Segwit,
         MAX_KEYS_MULTI,
     )
 }
@@ -1223,12 +1267,94 @@ impl SegwitVersion {
     }
 }
 
+/// Validates the BIP-388 "Additional rules" that go beyond template syntax:
+///
+/// * **B1** at least one key placeholder must be present;
+/// * **B2** every referenced key index must resolve into `key_information`, and
+///   the key vector must be fully used (a bijection with `{0, .., k-1}`). The
+///   `@i` first-appearance *ordering* is a SHOULD in BIP-388 and is deliberately
+///   **not** enforced, so out-of-order templates are accepted;
+/// * **B3** the public keys in `key_information` must be pairwise distinct;
+/// * **B4** if the same key placeholder is used with several `/<M;N>/*` suffixes,
+///   the index sets `{M,N}` must be pairwise disjoint. Two `musig(...)`
+///   placeholders count as the same key iff they have the same *set* of indices.
+fn validate_policy(
+    template: &DescriptorTemplate,
+    key_information: &[KeyInformation],
+) -> Result<(), ParseError> {
+    use alloc::collections::{BTreeMap, BTreeSet};
+
+    // Collect the placeholders once, in traversal order.
+    let placeholders: Vec<&KeyExpression> = template.placeholders().map(|(kp, _)| kp).collect();
+
+    // B1: a wallet policy must have at least one key placeholder.
+    if placeholders.is_empty() {
+        return Err(ParseError::NoKeyPlaceholders);
+    }
+
+    // B2: every referenced index must resolve to a key, and the vector must be
+    // used exactly. Since every referenced index is checked to be `< k`, the set
+    // of referenced indices equals `{0, .., k-1}` iff it has exactly `k` members.
+    let k = key_information.len();
+    let mut referenced: BTreeSet<u32> = BTreeSet::new();
+    for kp in &placeholders {
+        let indices: &[u32] = match &kp.key_type {
+            KeyExpressionType::PlainKey(i) => core::slice::from_ref(i),
+            KeyExpressionType::Musig(indices) => indices,
+        };
+        for &i in indices {
+            if (i as usize) >= k {
+                return Err(ParseError::InvalidKeyIndex);
+            }
+            referenced.insert(i);
+        }
+    }
+    if referenced.len() != k {
+        return Err(ParseError::KeyIndexCountMismatch);
+    }
+
+    // B3: the public keys must be pairwise distinct (compared as serialized
+    // xpubs; the origin info is irrelevant to key identity).
+    let mut seen_keys: BTreeSet<[u8; 78]> = BTreeSet::new();
+    for key_info in key_information {
+        if !seen_keys.insert(key_info.pubkey.encode()) {
+            return Err(ParseError::DuplicateKey);
+        }
+    }
+
+    // B4: multipath index sets for each key placeholder must be pairwise
+    // disjoint across its occurrences.
+    let mut used_per_key: BTreeMap<KeyExpressionType, BTreeSet<u32>> = BTreeMap::new();
+    for kp in &placeholders {
+        // Normalize musig groups so identity is the *set* of indices, regardless
+        // of the order they were written in.
+        let key = match &kp.key_type {
+            KeyExpressionType::PlainKey(_) => kp.key_type.clone(),
+            KeyExpressionType::Musig(indices) => {
+                let mut sorted = indices.clone();
+                sorted.sort_unstable();
+                KeyExpressionType::Musig(sorted)
+            }
+        };
+        let used = used_per_key.entry(key).or_default();
+        // A1 guarantees `num1 != num2` within one expression, so a clash here
+        // means two occurrences of this placeholder share a multipath index.
+        if !used.insert(kp.num1) || !used.insert(kp.num2) {
+            return Err(ParseError::OverlappingMultipath);
+        }
+    }
+
+    Ok(())
+}
+
 impl WalletPolicy {
     pub fn new(
         descriptor_template_str: &str,
         key_information: Vec<KeyInformation>,
     ) -> Result<Self, ParseError> {
         let descriptor_template = DescriptorTemplate::from_str(descriptor_template_str)?;
+
+        validate_policy(&descriptor_template, &key_information)?;
 
         Ok(Self {
             descriptor_template,
@@ -1707,6 +1833,20 @@ mod tests {
 
     fn koi(key_origin_str: &str) -> KeyInformation {
         KeyInformation::try_from(key_origin_str).unwrap()
+    }
+
+    // Three distinct valid xpubs used by the wallet-policy validation tests.
+    const XPUB_A: &str = "tpubDE7NQymr4AFtcJXi9TaWZtrhAdy8QyKmT4U6b9qYByAxCzoyMJ8zw5d8xVLVpbTRAEqP8pVUxjLE2vDt1rSFjaiS8DSz1QcNZ8D1qxUMx1g";
+    const XPUB_B: &str = "tpubDFAqEGNyad35YgH8zxvxFZqNUoPtr5mDojs7wzbXQBHTZ4xHeVXG6w2HvsKvjBpaRpTmjYDjdPg5w2c6Wvu8QBkyMDrmBWdCyqkDM7reSsY";
+    const XPUB_C: &str = "tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P";
+
+    // `n` distinct KeyInformation entries (n <= 3) for policies that reference
+    // exactly that many keys.
+    fn distinct_keys(n: usize) -> Vec<KeyInformation> {
+        [XPUB_A, XPUB_B, XPUB_C][..n]
+            .iter()
+            .map(|s| koi(s))
+            .collect()
     }
 
     #[test]
@@ -2349,5 +2489,207 @@ mod tests {
         let out = dt.to_descriptor(&keys, true, 3).unwrap();
         let expected = format!("wsh(thresh(1,pk({}/1/3),s:pk({}/1/3)))", xpub_str, xpub_str);
         assert_eq!(out, expected);
+    }
+
+    // ----- BIP-388 compliance: parser-level rules -----
+
+    #[test]
+    fn test_multipath_indices_must_be_distinct() {
+        // A1: `/<NUM;NUM>/*` requires two distinct numbers.
+        assert_eq!(
+            parse_key_expression("@0/<5;5>/*", ParseContext::TopLevel),
+            Err(ParseError::NonDistinctMultipath)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(musig(@0,@1)/<3;3>/*)"),
+            Err(ParseError::NonDistinctMultipath)
+        );
+        // Distinct indices (and the `/**` shorthand) still parse.
+        assert!(parse_key_expression("@0/<0;1>/*", ParseContext::TopLevel).is_ok());
+        assert!(parse_key_expression("@0/**", ParseContext::TopLevel).is_ok());
+        assert!(parse_key_expression("@0/<9;3>/*", ParseContext::TopLevel).is_ok());
+    }
+
+    #[test]
+    fn test_multi_only_inside_sh_or_wsh() {
+        // A2: multi/sortedmulti are allowed only inside sh() or wsh().
+        for allowed in [
+            "sh(multi(2,@0/**,@1/**))",
+            "wsh(multi(2,@0/**,@1/**))",
+            "sh(wsh(multi(2,@0/**,@1/**)))",
+            "sh(sortedmulti(2,@0/**,@1/**))",
+            "wsh(sortedmulti(2,@0/**,@1/**))",
+        ] {
+            assert!(
+                DescriptorTemplate::from_str(allowed).is_ok(),
+                "should parse: {allowed}"
+            );
+        }
+        for rejected in [
+            "multi(2,@0/**,@1/**)",
+            "sortedmulti(2,@0/**,@1/**)",
+            "tr(@0/**,multi(2,@1/**,@2/**))",
+            "tr(@0/**,sortedmulti(2,@1/**,@2/**))",
+        ] {
+            assert_eq!(
+                DescriptorTemplate::from_str(rejected),
+                Err(ParseError::InvalidScriptContext),
+                "should be rejected: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multi_a_only_inside_tr() {
+        // A3: multi_a/sortedmulti_a are tapscript-only, so allowed only in tr().
+        assert!(DescriptorTemplate::from_str("tr(@0/**,multi_a(2,@1/**,@2/**))").is_ok());
+        assert!(DescriptorTemplate::from_str("tr(@0/**,sortedmulti_a(2,@1/**,@2/**))").is_ok());
+        for rejected in [
+            "multi_a(2,@0/**,@1/**)",
+            "sortedmulti_a(2,@0/**,@1/**)",
+            "wsh(multi_a(2,@0/**,@1/**))",
+            "sh(wsh(multi_a(2,@0/**,@1/**)))",
+        ] {
+            assert_eq!(
+                DescriptorTemplate::from_str(rejected),
+                Err(ParseError::InvalidScriptContext),
+                "should be rejected: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pkh_allowed_in_miniscript() {
+        // Per the chosen interpretation, `pkh` is valid miniscript both inside
+        // wsh and inside a taproot tree (the `c:pk_h` form).
+        assert!(DescriptorTemplate::from_str("wsh(pkh(@0/**))").is_ok());
+        assert!(DescriptorTemplate::from_str("tr(@0/**,pkh(@1/**))").is_ok());
+        assert!(DescriptorTemplate::from_str("wsh(or_d(pk(@0/**),pkh(@1/**)))").is_ok());
+    }
+
+    // ----- BIP-388 compliance: whole-policy validation in WalletPolicy::new -----
+
+    #[test]
+    fn test_policy_requires_key_placeholder() {
+        // B1: a policy with no key placeholder is rejected.
+        assert_eq!(
+            WalletPolicy::new("older(12345)", vec![]),
+            Err(ParseError::NoKeyPlaceholders)
+        );
+    }
+
+    #[test]
+    fn test_policy_key_index_and_count() {
+        // B2: an out-of-range index is rejected.
+        assert_eq!(
+            WalletPolicy::new("wsh(multi(2,@0/**,@2/**))", distinct_keys(2)),
+            Err(ParseError::InvalidKeyIndex)
+        );
+        // An unused key (count mismatch) is rejected.
+        assert_eq!(
+            WalletPolicy::new("pkh(@0/**)", distinct_keys(2)),
+            Err(ParseError::KeyIndexCountMismatch)
+        );
+        // Too few keys for the referenced placeholders is rejected.
+        assert_eq!(
+            WalletPolicy::new("wsh(sortedmulti(2,@0/**,@1/**))", distinct_keys(1)),
+            Err(ParseError::InvalidKeyIndex)
+        );
+        // Exactly the right keys, all used: OK.
+        assert!(WalletPolicy::new("wsh(sortedmulti(2,@0/**,@1/**))", distinct_keys(2)).is_ok());
+    }
+
+    #[test]
+    fn test_policy_placeholder_order_is_tolerated() {
+        // B5: the `@i` first-appearance ordering is a SHOULD in BIP-388, so an
+        // out-of-order template with a full, correct key set is accepted.
+        assert!(WalletPolicy::new("wsh(sortedmulti(2,@1/**,@0/**))", distinct_keys(2)).is_ok());
+    }
+
+    #[test]
+    fn test_policy_rejects_duplicate_keys() {
+        // B3: the public keys must be pairwise distinct.
+        assert_eq!(
+            WalletPolicy::new(
+                "wsh(sortedmulti(2,@0/**,@1/**))",
+                vec![koi(XPUB_A), koi(XPUB_A)]
+            ),
+            Err(ParseError::DuplicateKey)
+        );
+    }
+
+    #[test]
+    fn test_policy_multipath_must_be_disjoint() {
+        // B4: repeated use of the same placeholder must use disjoint multipaths.
+        // `/**` = `/<0;1>/*`, so both occurrences share {0,1}.
+        assert_eq!(
+            WalletPolicy::new("wsh(multi(2,@0/**,@0/**))", distinct_keys(1)),
+            Err(ParseError::OverlappingMultipath)
+        );
+        // Partial overlap ({0,1} vs {1,2}) is also rejected.
+        assert_eq!(
+            WalletPolicy::new("wsh(multi(2,@0/<0;1>/*,@0/<1;2>/*))", distinct_keys(1)),
+            Err(ParseError::OverlappingMultipath)
+        );
+        // Disjoint multipaths for the same placeholder are allowed.
+        assert!(WalletPolicy::new("wsh(multi(2,@0/<0;1>/*,@0/<2;3>/*))", distinct_keys(1)).is_ok());
+    }
+
+    #[test]
+    fn test_policy_musig_identity_is_by_index_set() {
+        // Two musig placeholders are "the same key" iff they have the same set
+        // of indices, regardless of order. Same set + same multipath overlaps.
+        assert_eq!(
+            WalletPolicy::new(
+                "tr(musig(@0,@1)/<0;1>/*,pk(musig(@1,@0)/<0;1>/*))",
+                distinct_keys(2)
+            ),
+            Err(ParseError::OverlappingMultipath)
+        );
+        // Same set but disjoint multipaths is fine.
+        assert!(WalletPolicy::new(
+            "tr(musig(@0,@1)/<0;1>/*,pk(musig(@1,@0)/<2;3>/*))",
+            distinct_keys(2)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_standard_bip388_policies_are_valid() {
+        // The canonical BIP-388 single-account templates, end to end through
+        // WalletPolicy::new (template + key vector), each with the right number
+        // of distinct keys.
+        let cases: &[(&str, usize)] = &[
+            ("pkh(@0/**)", 1),                      // BIP-44
+            ("sh(wpkh(@0/**))", 1),                 // BIP-49
+            ("wpkh(@0/**)", 1),                     // BIP-84
+            ("tr(@0/**)", 1),                       // BIP-86
+            ("wsh(sortedmulti(2,@0/**,@1/**))", 2), // BIP-48 P2WSH multisig
+            ("sh(wsh(sortedmulti(2,@0/**,@1/**)))", 2),
+        ];
+        for &(template, n) in cases {
+            assert!(
+                WalletPolicy::new(template, distinct_keys(n)).is_ok(),
+                "should be a valid policy: {template}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_wallet_policy_serialize_roundtrip() {
+        // Round-trip a real policy (with origin info) through serialize/deserialize.
+        let policy = WalletPolicy::new(
+            "wsh(sortedmulti(2,@0/**,@1/**))",
+            vec![
+                koi("[76223a6e/48'/1'/0'/1']tpubDE7NQymr4AFtcJXi9TaWZtrhAdy8QyKmT4U6b9qYByAxCzoyMJ8zw5d8xVLVpbTRAEqP8pVUxjLE2vDt1rSFjaiS8DSz1QcNZ8D1qxUMx1g"),
+                koi("[f5acc2fd/48'/1'/0'/1']tpubDFAqEGNyad35YgH8zxvxFZqNUoPtr5mDojs7wzbXQBHTZ4xHeVXG6w2HvsKvjBpaRpTmjYDjdPg5w2c6Wvu8QBkyMDrmBWdCyqkDM7reSsY"),
+            ],
+        )
+        .unwrap();
+
+        let bytes = policy.serialize();
+        let mut cursor = bitcoin::io::Cursor::new(bytes);
+        let decoded = WalletPolicy::deserialize(&mut cursor).expect("round-trip should succeed");
+        assert_eq!(policy, decoded);
     }
 }
