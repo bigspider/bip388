@@ -85,6 +85,19 @@ pub enum ParseError {
     InvalidMultisigQuorum,
     /// Descriptor template nesting exceeds [`MAX_PARSE_DEPTH`].
     NestingTooDeep,
+    /// The two multipath indices in `/<M;N>/*` are equal (they must be distinct).
+    NonDistinctMultipath,
+    /// A wallet policy has no key placeholders (at least one is required).
+    NoKeyPlaceholders,
+    /// The referenced key placeholders do not match the key information vector:
+    /// some index is unused, or the counts differ.
+    KeyIndexCountMismatch,
+    /// The key information vector contains duplicate public keys (they must be
+    /// pairwise distinct).
+    DuplicateKey,
+    /// The same key placeholder is used with overlapping multipath index sets
+    /// (`{M,N}` and `{P,Q}` must be disjoint).
+    OverlappingMultipath,
 }
 
 /// The parsing context, tracking which top-level descriptor we are inside.
@@ -126,6 +139,19 @@ impl ParseContext {
     /// `tr()` is only allowed at the top level.
     fn tr_allowed(self) -> bool {
         matches!(self, ParseContext::TopLevel)
+    }
+
+    /// `multi()`/`sortedmulti()` are only allowed inside `sh()` or `wsh()`.
+    fn multi_allowed(self) -> bool {
+        matches!(
+            self,
+            ParseContext::Legacy | ParseContext::Segwit | ParseContext::WrappedSegwit
+        )
+    }
+
+    /// `multi_a()`/`sortedmulti_a()` are tapscript-only, so allowed only inside `tr()`.
+    fn multi_a_allowed(self) -> bool {
+        matches!(self, ParseContext::Taproot)
     }
 }
 
@@ -250,15 +276,15 @@ pub enum DescriptorTemplate {
 }
 
 pub struct DescriptorTemplateIter<'a> {
-    fragments: Vec<(&'a DescriptorTemplate, Option<&'a DescriptorTemplate>)>, // Store DescriptorTemplate and its associated leaf context
-    placeholders: Vec<(&'a KeyExpression, Option<&'a DescriptorTemplate>)>, // Placeholders also carry the leaf context
+    placeholders: alloc::vec::IntoIter<(&'a KeyExpression, Option<&'a DescriptorTemplate>)>,
 }
 
 impl<'a> From<&'a DescriptorTemplate> for DescriptorTemplateIter<'a> {
     fn from(desc: &'a DescriptorTemplate) -> Self {
+        let mut placeholders = Vec::new();
+        desc.collect_placeholders(None, &mut placeholders);
         DescriptorTemplateIter {
-            fragments: vec![(desc, None)], // Initially, there is no associated leaf context
-            placeholders: Vec::new(),
+            placeholders: placeholders.into_iter(),
         }
     }
 }
@@ -267,99 +293,7 @@ impl<'a> Iterator for DescriptorTemplateIter<'a> {
     type Item = (&'a KeyExpression, Option<&'a DescriptorTemplate>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while !self.placeholders.is_empty() || !self.fragments.is_empty() {
-            // If there are pending placeholders, pop and return one
-            if let Some(item) = self.placeholders.pop() {
-                return Some(item);
-            }
-
-            let next_fragment = self.fragments.pop();
-            if next_fragment.is_none() {
-                break;
-            }
-            let (frag, tapleaf_desc) = next_fragment.unwrap();
-            match frag {
-                DescriptorTemplate::Sh(sub)
-                | DescriptorTemplate::Wsh(sub)
-                | DescriptorTemplate::A(sub)
-                | DescriptorTemplate::S(sub)
-                | DescriptorTemplate::C(sub)
-                | DescriptorTemplate::T(sub)
-                | DescriptorTemplate::D(sub)
-                | DescriptorTemplate::V(sub)
-                | DescriptorTemplate::J(sub)
-                | DescriptorTemplate::N(sub)
-                | DescriptorTemplate::L(sub)
-                | DescriptorTemplate::U(sub) => {
-                    self.fragments.push((sub, tapleaf_desc));
-                }
-
-                DescriptorTemplate::Andor(sub1, sub2, sub3) => {
-                    self.fragments.push((sub3, tapleaf_desc));
-                    self.fragments.push((sub2, tapleaf_desc));
-                    self.fragments.push((sub1, tapleaf_desc));
-                }
-
-                DescriptorTemplate::Or_b(sub1, sub2)
-                | DescriptorTemplate::Or_c(sub1, sub2)
-                | DescriptorTemplate::Or_d(sub1, sub2)
-                | DescriptorTemplate::Or_i(sub1, sub2)
-                | DescriptorTemplate::And_v(sub1, sub2)
-                | DescriptorTemplate::And_b(sub1, sub2)
-                | DescriptorTemplate::And_n(sub1, sub2) => {
-                    self.fragments.push((sub2, tapleaf_desc));
-                    self.fragments.push((sub1, tapleaf_desc));
-                }
-
-                DescriptorTemplate::Tr(key, tree) => {
-                    self.placeholders.push((key, None));
-                    if let Some(t) = tree {
-                        let mut leaves: Vec<_> = t.tapleaves().collect();
-                        leaves.reverse();
-                        for leaf in leaves {
-                            self.fragments.push((leaf, Some(leaf)));
-                        }
-                    }
-                }
-
-                DescriptorTemplate::Pkh(key)
-                | DescriptorTemplate::Wpkh(key)
-                | DescriptorTemplate::Pk(key)
-                | DescriptorTemplate::Pk_k(key)
-                | DescriptorTemplate::Pk_h(key) => {
-                    return Some((key, tapleaf_desc));
-                }
-
-                DescriptorTemplate::Sortedmulti(_, keys)
-                | DescriptorTemplate::Sortedmulti_a(_, keys)
-                | DescriptorTemplate::Multi(_, keys)
-                | DescriptorTemplate::Multi_a(_, keys) => {
-                    // Push keys onto the keys stack in reverse order
-                    for key in keys.iter().rev() {
-                        self.placeholders.push((key, tapleaf_desc));
-                    }
-                }
-
-                DescriptorTemplate::Thresh(_, descs) => {
-                    for desc in descs.iter().rev() {
-                        self.fragments.push((desc, tapleaf_desc));
-                    }
-                }
-
-                DescriptorTemplate::Zero
-                | DescriptorTemplate::One
-                | DescriptorTemplate::Older(_)
-                | DescriptorTemplate::After(_)
-                | DescriptorTemplate::Sha256(_)
-                | DescriptorTemplate::Ripemd160(_)
-                | DescriptorTemplate::Hash256(_)
-                | DescriptorTemplate::Hash160(_) => {
-                    // nothing to do, there are no placeholders for these
-                }
-            }
-        }
-
-        None
+        self.placeholders.next()
     }
 }
 
@@ -369,132 +303,15 @@ impl<'a> Iterator for DescriptorTemplateIter<'a> {
 /// [`DescriptorTemplateIter`] (the immutable counterpart), so that in-place
 /// mutations preserve the canonical ordering expected by
 /// `are_key_derivations_canonical`.
-///
-/// Uses raw pointers internally to satisfy Rust's aliasing rules while still
-/// providing a safe interface through the `placeholders_mut` method.
 pub struct DescriptorTemplateIterMut<'a> {
-    fragments: Vec<*mut DescriptorTemplate>,
-    placeholders: Vec<*mut KeyExpression>,
-    _marker: core::marker::PhantomData<&'a mut DescriptorTemplate>,
+    placeholders: alloc::vec::IntoIter<&'a mut KeyExpression>,
 }
 
 impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
     type Item = &'a mut KeyExpression;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(ptr) = self.placeholders.pop() {
-                // SAFETY: ptr was derived from a uniquely-borrowed &mut KeyExpression
-                // that lives for 'a; no other reference to it exists.
-                return Some(unsafe { &mut *ptr });
-            }
-
-            let frag_ptr = self.fragments.pop()?;
-            // SAFETY: ptr was derived from a uniquely-borrowed &mut DescriptorTemplate
-            // that lives for 'a; we create only one &mut at a time per pointer.
-            let frag = unsafe { &mut *frag_ptr };
-
-            match frag {
-                DescriptorTemplate::Sh(sub)
-                | DescriptorTemplate::Wsh(sub)
-                | DescriptorTemplate::A(sub)
-                | DescriptorTemplate::S(sub)
-                | DescriptorTemplate::C(sub)
-                | DescriptorTemplate::T(sub)
-                | DescriptorTemplate::D(sub)
-                | DescriptorTemplate::V(sub)
-                | DescriptorTemplate::J(sub)
-                | DescriptorTemplate::N(sub)
-                | DescriptorTemplate::L(sub)
-                | DescriptorTemplate::U(sub) => {
-                    self.fragments.push(sub.as_mut() as *mut DescriptorTemplate);
-                }
-
-                DescriptorTemplate::Andor(sub1, sub2, sub3) => {
-                    self.fragments
-                        .push(sub3.as_mut() as *mut DescriptorTemplate);
-                    self.fragments
-                        .push(sub2.as_mut() as *mut DescriptorTemplate);
-                    self.fragments
-                        .push(sub1.as_mut() as *mut DescriptorTemplate);
-                }
-
-                DescriptorTemplate::Or_b(sub1, sub2)
-                | DescriptorTemplate::Or_c(sub1, sub2)
-                | DescriptorTemplate::Or_d(sub1, sub2)
-                | DescriptorTemplate::Or_i(sub1, sub2)
-                | DescriptorTemplate::And_v(sub1, sub2)
-                | DescriptorTemplate::And_b(sub1, sub2)
-                | DescriptorTemplate::And_n(sub1, sub2) => {
-                    self.fragments
-                        .push(sub2.as_mut() as *mut DescriptorTemplate);
-                    self.fragments
-                        .push(sub1.as_mut() as *mut DescriptorTemplate);
-                }
-
-                DescriptorTemplate::Tr(key, tree) => {
-                    self.placeholders.push(key as *mut KeyExpression);
-                    if let Some(t) = tree {
-                        // Traverse the TapTree to collect mutable pointers to all
-                        // leaves in left-to-right order (matching TapleavesIter),
-                        // then reverse so we pop them in the correct order.
-                        let mut leaf_ptrs: Vec<*mut DescriptorTemplate> = Vec::new();
-                        let mut stack: Vec<*mut TapTree> = vec![t as *mut TapTree];
-                        while let Some(node_ptr) = stack.pop() {
-                            // SAFETY: node_ptr is derived from a valid &mut TapTree
-                            // that lives for 'a; each node is visited exactly once.
-                            let node = unsafe { &mut *node_ptr };
-                            match node {
-                                TapTree::Script(dt) => {
-                                    leaf_ptrs.push(dt.as_mut() as *mut DescriptorTemplate);
-                                }
-                                TapTree::Branch(left, right) => {
-                                    stack.push(&mut **right as *mut TapTree);
-                                    stack.push(&mut **left as *mut TapTree);
-                                }
-                            }
-                        }
-                        leaf_ptrs.reverse();
-                        self.fragments.extend(leaf_ptrs);
-                    }
-                }
-
-                DescriptorTemplate::Pkh(key)
-                | DescriptorTemplate::Wpkh(key)
-                | DescriptorTemplate::Pk(key)
-                | DescriptorTemplate::Pk_k(key)
-                | DescriptorTemplate::Pk_h(key) => {
-                    // SAFETY: key is a field of frag which is valid for 'a.
-                    return Some(unsafe { &mut *(key as *mut KeyExpression) });
-                }
-
-                DescriptorTemplate::Sortedmulti(_, keys)
-                | DescriptorTemplate::Sortedmulti_a(_, keys)
-                | DescriptorTemplate::Multi(_, keys)
-                | DescriptorTemplate::Multi_a(_, keys) => {
-                    for key in keys.iter_mut().rev() {
-                        self.placeholders.push(key as *mut KeyExpression);
-                    }
-                }
-
-                DescriptorTemplate::Thresh(_, descs) => {
-                    for desc in descs.iter_mut().rev() {
-                        self.fragments.push(desc as *mut DescriptorTemplate);
-                    }
-                }
-
-                DescriptorTemplate::Zero
-                | DescriptorTemplate::One
-                | DescriptorTemplate::Older(_)
-                | DescriptorTemplate::After(_)
-                | DescriptorTemplate::Sha256(_)
-                | DescriptorTemplate::Ripemd160(_)
-                | DescriptorTemplate::Hash256(_)
-                | DescriptorTemplate::Hash160(_) => {
-                    // no key placeholders in terminal fragments
-                }
-            }
-        }
+        self.placeholders.next()
     }
 }
 
@@ -518,11 +335,169 @@ impl DescriptorTemplate {
     pub fn placeholders(&self) -> DescriptorTemplateIter<'_> {
         DescriptorTemplateIter::from(self)
     }
+
     pub fn placeholders_mut(&mut self) -> DescriptorTemplateIterMut<'_> {
+        let mut placeholders = Vec::new();
+        self.collect_placeholders_mut(&mut placeholders);
         DescriptorTemplateIterMut {
-            fragments: vec![self as *mut DescriptorTemplate],
-            placeholders: Vec::new(),
-            _marker: core::marker::PhantomData,
+            placeholders: placeholders.into_iter(),
+        }
+    }
+
+    /// Appends every key placeholder to `out` in left-to-right pre-order,
+    /// tagging each with the `tr(...)` tap-leaf it belongs to (`None` for the
+    /// taproot internal key and for keys outside any tap-tree). This single
+    /// recursive traversal backs [`DescriptorTemplateIter`];
+    /// [`Self::collect_placeholders_mut`] is its `&mut` twin and visits
+    /// fragments in the identical order.
+    fn collect_placeholders<'a>(
+        &'a self,
+        leaf_ctx: Option<&'a DescriptorTemplate>,
+        out: &mut Vec<(&'a KeyExpression, Option<&'a DescriptorTemplate>)>,
+    ) {
+        match self {
+            DescriptorTemplate::Sh(sub)
+            | DescriptorTemplate::Wsh(sub)
+            | DescriptorTemplate::A(sub)
+            | DescriptorTemplate::S(sub)
+            | DescriptorTemplate::C(sub)
+            | DescriptorTemplate::T(sub)
+            | DescriptorTemplate::D(sub)
+            | DescriptorTemplate::V(sub)
+            | DescriptorTemplate::J(sub)
+            | DescriptorTemplate::N(sub)
+            | DescriptorTemplate::L(sub)
+            | DescriptorTemplate::U(sub) => sub.collect_placeholders(leaf_ctx, out),
+
+            DescriptorTemplate::Andor(a, b, c) => {
+                a.collect_placeholders(leaf_ctx, out);
+                b.collect_placeholders(leaf_ctx, out);
+                c.collect_placeholders(leaf_ctx, out);
+            }
+
+            DescriptorTemplate::Or_b(a, b)
+            | DescriptorTemplate::Or_c(a, b)
+            | DescriptorTemplate::Or_d(a, b)
+            | DescriptorTemplate::Or_i(a, b)
+            | DescriptorTemplate::And_v(a, b)
+            | DescriptorTemplate::And_b(a, b)
+            | DescriptorTemplate::And_n(a, b) => {
+                a.collect_placeholders(leaf_ctx, out);
+                b.collect_placeholders(leaf_ctx, out);
+            }
+
+            DescriptorTemplate::Tr(key, tree) => {
+                out.push((key, None));
+                if let Some(tree) = tree {
+                    for leaf in tree.tapleaves() {
+                        leaf.collect_placeholders(Some(leaf), out);
+                    }
+                }
+            }
+
+            DescriptorTemplate::Pkh(key)
+            | DescriptorTemplate::Wpkh(key)
+            | DescriptorTemplate::Pk(key)
+            | DescriptorTemplate::Pk_k(key)
+            | DescriptorTemplate::Pk_h(key) => out.push((key, leaf_ctx)),
+
+            DescriptorTemplate::Sortedmulti(_, keys)
+            | DescriptorTemplate::Sortedmulti_a(_, keys)
+            | DescriptorTemplate::Multi(_, keys)
+            | DescriptorTemplate::Multi_a(_, keys) => {
+                for key in keys {
+                    out.push((key, leaf_ctx));
+                }
+            }
+
+            DescriptorTemplate::Thresh(_, subs) => {
+                for sub in subs {
+                    sub.collect_placeholders(leaf_ctx, out);
+                }
+            }
+
+            DescriptorTemplate::Zero
+            | DescriptorTemplate::One
+            | DescriptorTemplate::Older(_)
+            | DescriptorTemplate::After(_)
+            | DescriptorTemplate::Sha256(_)
+            | DescriptorTemplate::Ripemd160(_)
+            | DescriptorTemplate::Hash256(_)
+            | DescriptorTemplate::Hash160(_) => {}
+        }
+    }
+
+    /// `&mut` twin of [`Self::collect_placeholders`]: appends every placeholder
+    /// in the identical order (no leaf context is tracked). Kept safe by
+    /// descending through disjoint `&mut` sub-borrows rather than raw pointers.
+    fn collect_placeholders_mut<'a>(&'a mut self, out: &mut Vec<&'a mut KeyExpression>) {
+        match self {
+            DescriptorTemplate::Sh(sub)
+            | DescriptorTemplate::Wsh(sub)
+            | DescriptorTemplate::A(sub)
+            | DescriptorTemplate::S(sub)
+            | DescriptorTemplate::C(sub)
+            | DescriptorTemplate::T(sub)
+            | DescriptorTemplate::D(sub)
+            | DescriptorTemplate::V(sub)
+            | DescriptorTemplate::J(sub)
+            | DescriptorTemplate::N(sub)
+            | DescriptorTemplate::L(sub)
+            | DescriptorTemplate::U(sub) => sub.collect_placeholders_mut(out),
+
+            DescriptorTemplate::Andor(a, b, c) => {
+                a.collect_placeholders_mut(out);
+                b.collect_placeholders_mut(out);
+                c.collect_placeholders_mut(out);
+            }
+
+            DescriptorTemplate::Or_b(a, b)
+            | DescriptorTemplate::Or_c(a, b)
+            | DescriptorTemplate::Or_d(a, b)
+            | DescriptorTemplate::Or_i(a, b)
+            | DescriptorTemplate::And_v(a, b)
+            | DescriptorTemplate::And_b(a, b)
+            | DescriptorTemplate::And_n(a, b) => {
+                a.collect_placeholders_mut(out);
+                b.collect_placeholders_mut(out);
+            }
+
+            DescriptorTemplate::Tr(key, tree) => {
+                out.push(key);
+                if let Some(tree) = tree {
+                    tree.collect_leaf_placeholders_mut(out);
+                }
+            }
+
+            DescriptorTemplate::Pkh(key)
+            | DescriptorTemplate::Wpkh(key)
+            | DescriptorTemplate::Pk(key)
+            | DescriptorTemplate::Pk_k(key)
+            | DescriptorTemplate::Pk_h(key) => out.push(key),
+
+            DescriptorTemplate::Sortedmulti(_, keys)
+            | DescriptorTemplate::Sortedmulti_a(_, keys)
+            | DescriptorTemplate::Multi(_, keys)
+            | DescriptorTemplate::Multi_a(_, keys) => {
+                for key in keys.iter_mut() {
+                    out.push(key);
+                }
+            }
+
+            DescriptorTemplate::Thresh(_, subs) => {
+                for sub in subs.iter_mut() {
+                    sub.collect_placeholders_mut(out);
+                }
+            }
+
+            DescriptorTemplate::Zero
+            | DescriptorTemplate::One
+            | DescriptorTemplate::Older(_)
+            | DescriptorTemplate::After(_)
+            | DescriptorTemplate::Sha256(_)
+            | DescriptorTemplate::Ripemd160(_)
+            | DescriptorTemplate::Hash256(_)
+            | DescriptorTemplate::Hash160(_) => {}
         }
     }
 }
@@ -536,6 +511,19 @@ pub enum TapTree {
 impl TapTree {
     pub fn tapleaves(&self) -> TapleavesIter<'_> {
         TapleavesIter::new(self)
+    }
+
+    /// Appends the placeholders of every tap-leaf to `out`, mutably, in the
+    /// same left-to-right leaf order as [`TapleavesIter`]. Stays safe by
+    /// recursing through the tree's disjoint `&mut` sub-borrows.
+    fn collect_leaf_placeholders_mut<'a>(&'a mut self, out: &mut Vec<&'a mut KeyExpression>) {
+        match self {
+            TapTree::Script(desc) => desc.collect_placeholders_mut(out),
+            TapTree::Branch(left, right) => {
+                left.collect_leaf_placeholders_mut(out);
+                right.collect_leaf_placeholders_mut(out);
+            }
+        }
     }
 }
 
@@ -568,10 +556,10 @@ impl<'a> Iterator for TapleavesIter<'a> {
 
 impl core::fmt::Display for TapTree {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            TapTree::Script(desc) => write!(f, "{}", desc),
-            TapTree::Branch(left, right) => write!(f, "{{{},{}}}", left, right),
-        }
+        let mut s = String::new();
+        self.render(&mut s, &mut write_placeholder_key)
+            .map_err(|_| core::fmt::Error)?;
+        f.write_str(&s)
     }
 }
 
@@ -712,17 +700,11 @@ fn parse_descriptor_template(input: &str) -> Result<DescriptorTemplate, ParseErr
     }
 }
 
-// Parses a derivation-step number like "44" or "44'".
-fn parse_derivation_step_number(input: &str) -> ParseResult<'_, u32> {
-    let (rest, num) = parse_number_up_to(input, HARDENED_INDEX - 1)?;
-    if let Some(rest) = rest.strip_prefix('\'') {
-        Ok((rest, num + HARDENED_INDEX))
-    } else {
-        Ok((rest, num))
-    }
-}
-
 // Parses the derivation suffix: /** or /<num1;num2>/*
+//
+// `num1`/`num2` are plain, unhardened derivation indices (0..=2147483647): a
+// trailing `'` is rejected, since these are the change/multipath steps of a key
+// derived from an xpub, which cannot be hardened.
 fn parse_derivation_suffix(input: &str) -> ParseResult<'_, (u32, u32)> {
     if !input.starts_with('/') {
         return Err(ParseError::InvalidSyntax);
@@ -732,13 +714,17 @@ fn parse_derivation_suffix(input: &str) -> ParseResult<'_, (u32, u32)> {
     if let Some(rest) = rest.strip_prefix("**") {
         Ok((rest, (0u32, 1u32)))
     } else if let Some(rest) = rest.strip_prefix('<') {
-        let (rest, num1) = parse_derivation_step_number(rest)?;
+        let (rest, num1) = parse_number_up_to(rest, HARDENED_INDEX - 1)?;
         if !rest.starts_with(';') {
             return Err(ParseError::InvalidSyntax);
         }
-        let (rest, num2) = parse_derivation_step_number(&rest[1..])?;
+        let (rest, num2) = parse_number_up_to(&rest[1..], HARDENED_INDEX - 1)?;
         if !rest.starts_with(">/*") {
             return Err(ParseError::InvalidSyntax);
+        }
+        // BIP-388: the two numbers in `/<NUM;NUM>/*` must be distinct.
+        if num1 == num2 {
+            return Err(ParseError::NonDistinctMultipath);
         }
         Ok((&rest[3..], (num1, num2)))
     } else {
@@ -857,41 +843,46 @@ fn parse_inner_descriptor(
     depth: usize,
 ) -> ParseResult<'_, DescriptorTemplate> {
     // Longer names checked before shorter to avoid premature prefix matches.
-    if input.starts_with("sortedmulti_a(") {
+    // Each `strip_prefix` consumes the keyword and its opening '(', so the
+    // fragment helpers receive the input positioned at the first argument.
+    if let Some(rest) = input.strip_prefix("sortedmulti_a(") {
+        if !ctx.multi_a_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
         return parse_threshold_kp_fragment(
-            input,
-            "sortedmulti_a",
+            rest,
             DescriptorTemplate::Sortedmulti_a,
             ctx,
             MAX_KEYS_MULTI_A,
         );
     }
-    if input.starts_with("sortedmulti(") {
+    if let Some(rest) = input.strip_prefix("sortedmulti(") {
+        if !ctx.multi_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
         return parse_threshold_kp_fragment(
-            input,
-            "sortedmulti",
+            rest,
             DescriptorTemplate::Sortedmulti,
             ctx,
             MAX_KEYS_MULTI,
         );
     }
-    if input.starts_with("multi_a(") {
+    if let Some(rest) = input.strip_prefix("multi_a(") {
+        if !ctx.multi_a_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
         return parse_threshold_kp_fragment(
-            input,
-            "multi_a",
+            rest,
             DescriptorTemplate::Multi_a,
             ctx,
             MAX_KEYS_MULTI_A,
         );
     }
-    if input.starts_with("multi(") {
-        return parse_threshold_kp_fragment(
-            input,
-            "multi",
-            DescriptorTemplate::Multi,
-            ctx,
-            MAX_KEYS_MULTI,
-        );
+    if let Some(rest) = input.strip_prefix("multi(") {
+        if !ctx.multi_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
+        return parse_threshold_kp_fragment(rest, DescriptorTemplate::Multi, ctx, MAX_KEYS_MULTI);
     }
     if input.starts_with("thresh(") {
         return parse_thresh(input, ctx, depth);
@@ -919,14 +910,14 @@ fn parse_inner_descriptor(
         let (rest, [script]) = parse_n_subscripts(input, ParseContext::Legacy, depth)?;
         return Ok((rest, DescriptorTemplate::Sh(Box::new(script))));
     }
-    if input.starts_with("wpkh(") {
+    if let Some(rest) = input.strip_prefix("wpkh(") {
         if !ctx.wpkh_allowed() {
             return Err(ParseError::InvalidScriptContext);
         }
-        return parse_kp_fragment(input, "wpkh", DescriptorTemplate::Wpkh, ctx);
+        return parse_kp_fragment(rest, DescriptorTemplate::Wpkh, ctx);
     }
-    if input.starts_with("pkh(") {
-        return parse_kp_fragment(input, "pkh", DescriptorTemplate::Pkh, ctx);
+    if let Some(rest) = input.strip_prefix("pkh(") {
+        return parse_kp_fragment(rest, DescriptorTemplate::Pkh, ctx);
     }
     if input.starts_with("tr(") {
         if !ctx.tr_allowed() {
@@ -934,32 +925,32 @@ fn parse_inner_descriptor(
         }
         return parse_tr(input, depth);
     }
-    if input.starts_with("pk_k(") {
-        return parse_kp_fragment(input, "pk_k", DescriptorTemplate::Pk_k, ctx);
+    if let Some(rest) = input.strip_prefix("pk_k(") {
+        return parse_kp_fragment(rest, DescriptorTemplate::Pk_k, ctx);
     }
-    if input.starts_with("pk_h(") {
-        return parse_kp_fragment(input, "pk_h", DescriptorTemplate::Pk_h, ctx);
+    if let Some(rest) = input.strip_prefix("pk_h(") {
+        return parse_kp_fragment(rest, DescriptorTemplate::Pk_h, ctx);
     }
-    if input.starts_with("pk(") {
-        return parse_kp_fragment(input, "pk", DescriptorTemplate::Pk, ctx);
+    if let Some(rest) = input.strip_prefix("pk(") {
+        return parse_kp_fragment(rest, DescriptorTemplate::Pk, ctx);
     }
-    if input.starts_with("older(") {
-        return parse_num_fragment(input, "older", MAX_OLDER_AFTER, DescriptorTemplate::Older);
+    if let Some(rest) = input.strip_prefix("older(") {
+        return parse_num_fragment(rest, MAX_OLDER_AFTER, DescriptorTemplate::Older);
     }
-    if input.starts_with("after(") {
-        return parse_num_fragment(input, "after", MAX_OLDER_AFTER, DescriptorTemplate::After);
+    if let Some(rest) = input.strip_prefix("after(") {
+        return parse_num_fragment(rest, MAX_OLDER_AFTER, DescriptorTemplate::After);
     }
-    if input.starts_with("sha256(") {
-        return parse_hex32_fragment(input, "sha256", DescriptorTemplate::Sha256);
+    if let Some(rest) = input.strip_prefix("sha256(") {
+        return parse_hex32_fragment(rest, DescriptorTemplate::Sha256);
     }
-    if input.starts_with("hash256(") {
-        return parse_hex32_fragment(input, "hash256", DescriptorTemplate::Hash256);
+    if let Some(rest) = input.strip_prefix("hash256(") {
+        return parse_hex32_fragment(rest, DescriptorTemplate::Hash256);
     }
-    if input.starts_with("ripemd160(") {
-        return parse_hex20_fragment(input, "ripemd160", DescriptorTemplate::Ripemd160);
+    if let Some(rest) = input.strip_prefix("ripemd160(") {
+        return parse_hex20_fragment(rest, DescriptorTemplate::Ripemd160);
     }
-    if input.starts_with("hash160(") {
-        return parse_hex20_fragment(input, "hash160", DescriptorTemplate::Hash160);
+    if let Some(rest) = input.strip_prefix("hash160(") {
+        return parse_hex20_fragment(rest, DescriptorTemplate::Hash160);
     }
     if let Some(input) = input.strip_prefix("andor(") {
         let (rest, [x, y, z]) = parse_n_subscripts(input, ctx, depth)?;
@@ -1006,82 +997,73 @@ fn parse_inner_descriptor(
     Err(ParseError::UnrecognizedFragment)
 }
 
-// Parses a named fragment that wraps a single key expression: name(@...)
+// Parses the body of a fragment that wraps a single key expression: `@...)`.
+// `input` is positioned just after the fragment's opening '('.
 fn parse_kp_fragment<'a>(
     input: &'a str,
-    name: &str,
     constructor: fn(KeyExpression) -> DescriptorTemplate,
     ctx: ParseContext,
 ) -> ParseResult<'a, DescriptorTemplate> {
-    let rest = &input[name.len()..]; // caller already checked starts_with(name)
-    let (rest, kp) = parse_key_expression(&rest[1..], ctx)?; // skip '('
+    let (rest, kp) = parse_key_expression(input, ctx)?;
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(kp)))
 }
 
-// Parses "name(n)" where n is a number <= max.
+// Parses "n)" where n is a number <= max. `input` is positioned just after '('.
 fn parse_num_fragment<'a>(
     input: &'a str,
-    name: &str,
     max: u32,
     constructor: fn(u32) -> DescriptorTemplate,
 ) -> ParseResult<'a, DescriptorTemplate> {
-    let rest = &input[name.len()..]; // caller already checked starts_with(name)
-    let (rest, num) = parse_number_up_to(&rest[1..], max)?; // skip '('
+    let (rest, num) = parse_number_up_to(input, max)?;
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(num)))
 }
 
-// Parses "name(<40 hex chars>)".
+// Parses "<40 hex chars>)". `input` is positioned just after '('.
 fn parse_hex20_fragment<'a>(
     input: &'a str,
-    name: &str,
     constructor: fn([u8; 20]) -> DescriptorTemplate,
 ) -> ParseResult<'a, DescriptorTemplate> {
-    let rest = &input[name.len() + 1..]; // skip name and '('
-    if rest.len() < 40 {
+    if input.len() < 40 {
         return Err(ParseError::InvalidLength);
     }
-    let bytes = <[u8; 20]>::from_hex(&rest[..40]).map_err(|_| ParseError::InvalidHex)?;
-    let rest = &rest[40..];
+    let bytes = <[u8; 20]>::from_hex(&input[..40]).map_err(|_| ParseError::InvalidHex)?;
+    let rest = &input[40..];
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(bytes)))
 }
 
-// Parses "name(<64 hex chars>)".
+// Parses "<64 hex chars>)". `input` is positioned just after '('.
 fn parse_hex32_fragment<'a>(
     input: &'a str,
-    name: &str,
     constructor: fn([u8; 32]) -> DescriptorTemplate,
 ) -> ParseResult<'a, DescriptorTemplate> {
-    let rest = &input[name.len() + 1..]; // skip name and '('
-    if rest.len() < 64 {
+    if input.len() < 64 {
         return Err(ParseError::InvalidLength);
     }
-    let bytes = <[u8; 32]>::from_hex(&rest[..64]).map_err(|_| ParseError::InvalidHex)?;
-    let rest = &rest[64..];
+    let bytes = <[u8; 32]>::from_hex(&input[..64]).map_err(|_| ParseError::InvalidHex)?;
+    let rest = &input[64..];
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(bytes)))
 }
 
-// Parses "name(threshold,<key1>,<key1>,...)".
+// Parses "threshold,<key1>,<key2>,...)". `input` is positioned just after '('.
 fn parse_threshold_kp_fragment<'a>(
     input: &'a str,
-    name: &str,
     constructor: fn(u32, Vec<KeyExpression>) -> DescriptorTemplate,
     ctx: ParseContext,
     max_keys: usize,
 ) -> ParseResult<'a, DescriptorTemplate> {
-    let rest = &input[name.len() + 1..]; // skip name and '('
-    let (mut rest, threshold) = parse_number_up_to(rest, u32::MAX)?;
+    let (mut rest, threshold) = parse_number_up_to(input, u32::MAX)?;
     let mut keys: Vec<KeyExpression> = Vec::new();
     loop {
         if !rest.starts_with(',') {
@@ -1095,7 +1077,9 @@ fn parse_threshold_kp_fragment<'a>(
                 keys.push(kp);
                 rest = r;
             }
-            Err(ParseError::InvalidScriptContext) => return Err(ParseError::InvalidScriptContext),
+            // A hard script-context violation must propagate; only a "can't
+            // parse another key here" error (`Err(_)`) ends the key list.
+            Err(e @ ParseError::InvalidScriptContext) => return Err(e),
             Err(_) => break,
         }
     }
@@ -1150,11 +1134,15 @@ fn parse_wsh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
 
 #[cfg(test)]
 fn parse_sortedmulti(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+    let rest = input
+        .strip_prefix("sortedmulti(")
+        .ok_or(ParseError::InvalidSyntax)?;
+    // `sortedmulti` is only valid inside `sh`/`wsh`; use a segwit context so
+    // this helper exercises the fragment as it would appear in a real policy.
     parse_threshold_kp_fragment(
-        input,
-        "sortedmulti",
+        rest,
         DescriptorTemplate::Sortedmulti,
-        ParseContext::TopLevel,
+        ParseContext::Segwit,
         MAX_KEYS_MULTI,
     )
 }
@@ -1170,9 +1158,8 @@ fn parse_thresh(
         return Err(ParseError::InvalidSyntax);
     }
     // parse first script (mandatory)
-    let (rest, first) = parse_descriptor(&rest[1..], ctx, depth)?;
+    let (mut rest, first) = parse_descriptor(&rest[1..], ctx, depth)?;
     let mut scripts = vec![first];
-    let mut rest = rest;
     loop {
         if !rest.starts_with(',') {
             break;
@@ -1182,7 +1169,9 @@ fn parse_thresh(
                 scripts.push(desc);
                 rest = r;
             }
-            Err(ParseError::NestingTooDeep) => return Err(ParseError::NestingTooDeep),
+            // A hard nesting-limit error must propagate; only a "can't parse
+            // another sub-script here" error (`Err(_)`) ends the list.
+            Err(e @ ParseError::NestingTooDeep) => return Err(e),
             Err(_) => break,
         }
     }
@@ -1242,92 +1231,12 @@ impl FromStr for DescriptorTemplate {
     }
 }
 
-fn write_display_wrapper(
-    f: &mut core::fmt::Formatter<'_>,
-    ch: char,
-    inner: &DescriptorTemplate,
-) -> core::fmt::Result {
-    write!(f, "{}", ch)?;
-    if !inner.is_wrapper() {
-        write!(f, ":")?;
-    }
-    write!(f, "{}", inner)
-}
-
 impl core::fmt::Display for DescriptorTemplate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            DescriptorTemplate::Sh(inner) => write!(f, "sh({})", inner),
-            DescriptorTemplate::Wsh(inner) => write!(f, "wsh({})", inner),
-            DescriptorTemplate::Pkh(kp) => write!(f, "pkh({})", kp),
-            DescriptorTemplate::Wpkh(kp) => write!(f, "wpkh({})", kp),
-            DescriptorTemplate::Sortedmulti(k, kps) => {
-                write!(f, "sortedmulti({}", k)?;
-                for kp in kps {
-                    write!(f, ",{}", kp)?;
-                }
-                write!(f, ")")
-            }
-            DescriptorTemplate::Sortedmulti_a(k, kps) => {
-                write!(f, "sortedmulti_a({}", k)?;
-                for kp in kps {
-                    write!(f, ",{}", kp)?;
-                }
-                write!(f, ")")
-            }
-            DescriptorTemplate::Tr(kp, None) => write!(f, "tr({})", kp),
-            DescriptorTemplate::Tr(kp, Some(tree)) => write!(f, "tr({},{})", kp, tree),
-            DescriptorTemplate::Zero => write!(f, "0"),
-            DescriptorTemplate::One => write!(f, "1"),
-            DescriptorTemplate::Pk(kp) => write!(f, "pk({})", kp),
-            DescriptorTemplate::Pk_k(kp) => write!(f, "pk_k({})", kp),
-            DescriptorTemplate::Pk_h(kp) => write!(f, "pk_h({})", kp),
-            DescriptorTemplate::Older(n) => write!(f, "older({})", n),
-            DescriptorTemplate::After(n) => write!(f, "after({})", n),
-            DescriptorTemplate::Sha256(hash) => write!(f, "sha256({})", hex::encode(hash)),
-            DescriptorTemplate::Ripemd160(hash) => write!(f, "ripemd160({})", hex::encode(hash)),
-            DescriptorTemplate::Hash256(hash) => write!(f, "hash256({})", hex::encode(hash)),
-            DescriptorTemplate::Hash160(hash) => write!(f, "hash160({})", hex::encode(hash)),
-            DescriptorTemplate::Andor(x, y, z) => write!(f, "andor({},{},{})", x, y, z),
-            DescriptorTemplate::And_v(x, y) => write!(f, "and_v({},{})", x, y),
-            DescriptorTemplate::And_b(x, y) => write!(f, "and_b({},{})", x, y),
-            DescriptorTemplate::And_n(x, y) => write!(f, "and_n({},{})", x, y),
-            DescriptorTemplate::Or_b(x, y) => write!(f, "or_b({},{})", x, y),
-            DescriptorTemplate::Or_c(x, y) => write!(f, "or_c({},{})", x, y),
-            DescriptorTemplate::Or_d(x, y) => write!(f, "or_d({},{})", x, y),
-            DescriptorTemplate::Or_i(x, y) => write!(f, "or_i({},{})", x, y),
-            DescriptorTemplate::Thresh(k, descs) => {
-                write!(f, "thresh({}", k)?;
-                for desc in descs {
-                    write!(f, ",{}", desc)?;
-                }
-                write!(f, ")")
-            }
-            DescriptorTemplate::Multi(k, kps) => {
-                write!(f, "multi({}", k)?;
-                for kp in kps {
-                    write!(f, ",{}", kp)?;
-                }
-                write!(f, ")")
-            }
-            DescriptorTemplate::Multi_a(k, kps) => {
-                write!(f, "multi_a({}", k)?;
-                for kp in kps {
-                    write!(f, ",{}", kp)?;
-                }
-                write!(f, ")")
-            }
-            DescriptorTemplate::A(inner) => write_display_wrapper(f, 'a', inner),
-            DescriptorTemplate::S(inner) => write_display_wrapper(f, 's', inner),
-            DescriptorTemplate::C(inner) => write_display_wrapper(f, 'c', inner),
-            DescriptorTemplate::T(inner) => write_display_wrapper(f, 't', inner),
-            DescriptorTemplate::D(inner) => write_display_wrapper(f, 'd', inner),
-            DescriptorTemplate::V(inner) => write_display_wrapper(f, 'v', inner),
-            DescriptorTemplate::J(inner) => write_display_wrapper(f, 'j', inner),
-            DescriptorTemplate::N(inner) => write_display_wrapper(f, 'n', inner),
-            DescriptorTemplate::L(inner) => write_display_wrapper(f, 'l', inner),
-            DescriptorTemplate::U(inner) => write_display_wrapper(f, 'u', inner),
-        }
+        let mut s = String::new();
+        self.render(&mut s, &mut write_placeholder_key)
+            .map_err(|_| core::fmt::Error)?;
+        f.write_str(&s)
     }
 }
 
@@ -1358,12 +1267,94 @@ impl SegwitVersion {
     }
 }
 
+/// Validates the BIP-388 "Additional rules" that go beyond template syntax:
+///
+/// * **B1** at least one key placeholder must be present;
+/// * **B2** every referenced key index must resolve into `key_information`, and
+///   the key vector must be fully used (a bijection with `{0, .., k-1}`). The
+///   `@i` first-appearance *ordering* is a SHOULD in BIP-388 and is deliberately
+///   **not** enforced, so out-of-order templates are accepted;
+/// * **B3** the public keys in `key_information` must be pairwise distinct;
+/// * **B4** if the same key placeholder is used with several `/<M;N>/*` suffixes,
+///   the index sets `{M,N}` must be pairwise disjoint. Two `musig(...)`
+///   placeholders count as the same key iff they have the same *set* of indices.
+fn validate_policy(
+    template: &DescriptorTemplate,
+    key_information: &[KeyInformation],
+) -> Result<(), ParseError> {
+    use alloc::collections::{BTreeMap, BTreeSet};
+
+    // Collect the placeholders once, in traversal order.
+    let placeholders: Vec<&KeyExpression> = template.placeholders().map(|(kp, _)| kp).collect();
+
+    // B1: a wallet policy must have at least one key placeholder.
+    if placeholders.is_empty() {
+        return Err(ParseError::NoKeyPlaceholders);
+    }
+
+    // B2: every referenced index must resolve to a key, and the vector must be
+    // used exactly. Since every referenced index is checked to be `< k`, the set
+    // of referenced indices equals `{0, .., k-1}` iff it has exactly `k` members.
+    let k = key_information.len();
+    let mut referenced: BTreeSet<u32> = BTreeSet::new();
+    for kp in &placeholders {
+        let indices: &[u32] = match &kp.key_type {
+            KeyExpressionType::PlainKey(i) => core::slice::from_ref(i),
+            KeyExpressionType::Musig(indices) => indices,
+        };
+        for &i in indices {
+            if (i as usize) >= k {
+                return Err(ParseError::InvalidKeyIndex);
+            }
+            referenced.insert(i);
+        }
+    }
+    if referenced.len() != k {
+        return Err(ParseError::KeyIndexCountMismatch);
+    }
+
+    // B3: the public keys must be pairwise distinct (compared as serialized
+    // xpubs; the origin info is irrelevant to key identity).
+    let mut seen_keys: BTreeSet<[u8; 78]> = BTreeSet::new();
+    for key_info in key_information {
+        if !seen_keys.insert(key_info.pubkey.encode()) {
+            return Err(ParseError::DuplicateKey);
+        }
+    }
+
+    // B4: multipath index sets for each key placeholder must be pairwise
+    // disjoint across its occurrences.
+    let mut used_per_key: BTreeMap<KeyExpressionType, BTreeSet<u32>> = BTreeMap::new();
+    for kp in &placeholders {
+        // Normalize musig groups so identity is the *set* of indices, regardless
+        // of the order they were written in.
+        let key = match &kp.key_type {
+            KeyExpressionType::PlainKey(_) => kp.key_type.clone(),
+            KeyExpressionType::Musig(indices) => {
+                let mut sorted = indices.clone();
+                sorted.sort_unstable();
+                KeyExpressionType::Musig(sorted)
+            }
+        };
+        let used = used_per_key.entry(key).or_default();
+        // A1 guarantees `num1 != num2` within one expression, so a clash here
+        // means two occurrences of this placeholder share a multipath index.
+        if !used.insert(kp.num1) || !used.insert(kp.num2) {
+            return Err(ParseError::OverlappingMultipath);
+        }
+    }
+
+    Ok(())
+}
+
 impl WalletPolicy {
     pub fn new(
         descriptor_template_str: &str,
         key_information: Vec<KeyInformation>,
     ) -> Result<Self, ParseError> {
         let descriptor_template = DescriptorTemplate::from_str(descriptor_template_str)?;
+
+        validate_policy(&descriptor_template, &key_information)?;
 
         Ok(Self {
             descriptor_template,
@@ -1489,13 +1480,10 @@ impl WalletPolicy {
 
         // test that the stream is indeed exhausted
         let mut buf = [0u8; 1];
-        match r.read(&mut buf)? {
-            0 => {}
-            _ => {
-                return Err(encode::Error::ParseFailed(
-                    "Extra data after deserializing WalletPolicy",
-                ));
-            }
+        if r.read(&mut buf)? != 0 {
+            return Err(encode::Error::ParseFailed(
+                "Extra data after deserializing WalletPolicy",
+            ));
         }
 
         WalletPolicy::new(&descriptor_template_str, key_information).map_err(|_| {
@@ -1552,54 +1540,59 @@ fn write_key_expression(
     }
 }
 
-// Writes a comma-separated list of key expressions to a buffer.
-fn write_key_expressions(
+// Writes a key expression in template form: the `@N/**` (or `musig(@N,...)`)
+// placeholder, exactly as `KeyExpression`'s `Display` renders it. This is the
+// key writer used by the `Display` impls.
+fn write_placeholder_key(w: &mut String, kp: &KeyExpression) -> Result<(), ParseError> {
+    use core::fmt::Write;
+    write!(w, "{}", kp).map_err(|_| ParseError::FormatError)
+}
+
+// Writes a comma-separated list of key expressions, formatting each with `write_key`.
+fn write_key_list(
     w: &mut String,
-    key_information: &[KeyInformation],
     kps: &[KeyExpression],
-    is_change: bool,
-    address_index: u32,
+    write_key: &mut impl FnMut(&mut String, &KeyExpression) -> Result<(), ParseError>,
 ) -> Result<(), ParseError> {
     for (i, kp) in kps.iter().enumerate() {
         if i > 0 {
             w.push(',');
         }
-        write_key_expression(w, key_information, kp, is_change, address_index)?;
+        write_key(w, kp)?;
     }
     Ok(())
 }
 
-// Writes a wrapper fragment to a buffer.
+// Writes a single-character wrapper prefix and its inner fragment, inserting a
+// ':' only when the inner fragment is not itself a wrapper (the `asc:` vs `a`
+// grammar).
 fn write_wrapper(
     w: &mut String,
-    name: &str,
+    ch: char,
     inner: &DescriptorTemplate,
-    key_information: &[KeyInformation],
-    is_change: bool,
-    address_index: u32,
+    write_key: &mut impl FnMut(&mut String, &KeyExpression) -> Result<(), ParseError>,
 ) -> Result<(), ParseError> {
-    w.push_str(name);
+    w.push(ch);
     if !inner.is_wrapper() {
         w.push(':');
     }
-    inner.write_to(w, key_information, is_change, address_index)
+    inner.render(w, write_key)
 }
 
 impl TapTree {
-    fn write_to(
+    // Renders this tap-tree to `w`, delegating each key placeholder to `write_key`.
+    fn render(
         &self,
         w: &mut String,
-        key_information: &[KeyInformation],
-        is_change: bool,
-        address_index: u32,
+        write_key: &mut impl FnMut(&mut String, &KeyExpression) -> Result<(), ParseError>,
     ) -> Result<(), ParseError> {
         match self {
-            TapTree::Script(desc) => desc.write_to(w, key_information, is_change, address_index),
+            TapTree::Script(desc) => desc.render(w, write_key),
             TapTree::Branch(left, right) => {
                 w.push('{');
-                left.write_to(w, key_information, is_change, address_index)?;
+                left.render(w, write_key)?;
                 w.push(',');
-                right.write_to(w, key_information, is_change, address_index)?;
+                right.render(w, write_key)?;
                 w.push('}');
                 Ok(())
             }
@@ -1608,52 +1601,56 @@ impl TapTree {
 }
 
 impl DescriptorTemplate {
-    fn write_to(
+    /// Renders this template to `w`. The structure (keywords, parentheses,
+    /// separators, wrappers) is written here; the formatting of each key
+    /// placeholder is delegated to `write_key`. Both the template form
+    /// (`Display`, via [`write_placeholder_key`]) and the concrete-descriptor
+    /// form (`ToDescriptor`, via [`write_key_expression`]) go through this
+    /// single renderer so the two can never drift apart.
+    fn render(
         &self,
         w: &mut String,
-        key_information: &[KeyInformation],
-        is_change: bool,
-        address_index: u32,
+        write_key: &mut impl FnMut(&mut String, &KeyExpression) -> Result<(), ParseError>,
     ) -> Result<(), ParseError> {
         use core::fmt::Write;
 
         match self {
             DescriptorTemplate::Sh(inner) => {
                 w.push_str("sh(");
-                inner.write_to(w, key_information, is_change, address_index)?;
+                inner.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Wsh(inner) => {
                 w.push_str("wsh(");
-                inner.write_to(w, key_information, is_change, address_index)?;
+                inner.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Pkh(kp) => {
                 w.push_str("pkh(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 w.push(')');
             }
             DescriptorTemplate::Wpkh(kp) => {
                 w.push_str("wpkh(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 w.push(')');
             }
             DescriptorTemplate::Sortedmulti(threshold, kps) => {
                 write!(w, "sortedmulti({},", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_expressions(w, key_information, kps, is_change, address_index)?;
+                write_key_list(w, kps, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Sortedmulti_a(threshold, kps) => {
                 write!(w, "sortedmulti_a({},", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_expressions(w, key_information, kps, is_change, address_index)?;
+                write_key_list(w, kps, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Tr(kp, tap_tree) => {
                 w.push_str("tr(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 if let Some(tree) = tap_tree {
                     w.push(',');
-                    tree.write_to(w, key_information, is_change, address_index)?;
+                    tree.render(w, write_key)?;
                 }
                 w.push(')');
             }
@@ -1661,17 +1658,17 @@ impl DescriptorTemplate {
             DescriptorTemplate::One => w.push('1'),
             DescriptorTemplate::Pk(kp) => {
                 w.push_str("pk(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 w.push(')');
             }
             DescriptorTemplate::Pk_k(kp) => {
                 w.push_str("pk_k(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 w.push(')');
             }
             DescriptorTemplate::Pk_h(kp) => {
                 w.push_str("pk_h(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 w.push(')');
             }
             DescriptorTemplate::Older(n) => {
@@ -1702,110 +1699,90 @@ impl DescriptorTemplate {
             }
             DescriptorTemplate::Andor(x, y, z) => {
                 w.push_str("andor(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                y.write_to(w, key_information, is_change, address_index)?;
+                y.render(w, write_key)?;
                 w.push(',');
-                z.write_to(w, key_information, is_change, address_index)?;
+                z.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::And_v(x, y) => {
                 w.push_str("and_v(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                y.write_to(w, key_information, is_change, address_index)?;
+                y.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::And_b(x, y) => {
                 w.push_str("and_b(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                y.write_to(w, key_information, is_change, address_index)?;
+                y.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::And_n(x, y) => {
                 w.push_str("and_n(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                y.write_to(w, key_information, is_change, address_index)?;
+                y.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Or_b(x, z) => {
                 w.push_str("or_b(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                z.write_to(w, key_information, is_change, address_index)?;
+                z.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Or_c(x, z) => {
                 w.push_str("or_c(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                z.write_to(w, key_information, is_change, address_index)?;
+                z.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Or_d(x, z) => {
                 w.push_str("or_d(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                z.write_to(w, key_information, is_change, address_index)?;
+                z.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Or_i(x, z) => {
                 w.push_str("or_i(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                z.write_to(w, key_information, is_change, address_index)?;
+                z.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Thresh(k, sub_templates) => {
                 write!(w, "thresh({}", k).map_err(|_| ParseError::FormatError)?;
                 for template in sub_templates {
                     w.push(',');
-                    template.write_to(w, key_information, is_change, address_index)?;
+                    template.render(w, write_key)?;
                 }
                 w.push(')');
             }
             DescriptorTemplate::Multi(threshold, kps) => {
                 write!(w, "multi({},", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_expressions(w, key_information, kps, is_change, address_index)?;
+                write_key_list(w, kps, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Multi_a(threshold, kps) => {
                 write!(w, "multi_a({},", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_expressions(w, key_information, kps, is_change, address_index)?;
+                write_key_list(w, kps, write_key)?;
                 w.push(')');
             }
-            DescriptorTemplate::A(inner) => {
-                write_wrapper(w, "a", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::S(inner) => {
-                write_wrapper(w, "s", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::C(inner) => {
-                write_wrapper(w, "c", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::T(inner) => {
-                write_wrapper(w, "t", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::D(inner) => {
-                write_wrapper(w, "d", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::V(inner) => {
-                write_wrapper(w, "v", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::J(inner) => {
-                write_wrapper(w, "j", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::N(inner) => {
-                write_wrapper(w, "n", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::L(inner) => {
-                write_wrapper(w, "l", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::U(inner) => {
-                write_wrapper(w, "u", inner, key_information, is_change, address_index)?;
-            }
+            DescriptorTemplate::A(inner) => write_wrapper(w, 'a', inner, write_key)?,
+            DescriptorTemplate::S(inner) => write_wrapper(w, 's', inner, write_key)?,
+            DescriptorTemplate::C(inner) => write_wrapper(w, 'c', inner, write_key)?,
+            DescriptorTemplate::T(inner) => write_wrapper(w, 't', inner, write_key)?,
+            DescriptorTemplate::D(inner) => write_wrapper(w, 'd', inner, write_key)?,
+            DescriptorTemplate::V(inner) => write_wrapper(w, 'v', inner, write_key)?,
+            DescriptorTemplate::J(inner) => write_wrapper(w, 'j', inner, write_key)?,
+            DescriptorTemplate::N(inner) => write_wrapper(w, 'n', inner, write_key)?,
+            DescriptorTemplate::L(inner) => write_wrapper(w, 'l', inner, write_key)?,
+            DescriptorTemplate::U(inner) => write_wrapper(w, 'u', inner, write_key)?,
         }
         Ok(())
     }
@@ -1819,7 +1796,9 @@ impl ToDescriptor for TapTree {
         address_index: u32,
     ) -> Result<String, ParseError> {
         let mut result = String::new();
-        self.write_to(&mut result, key_information, is_change, address_index)?;
+        self.render(&mut result, &mut |w, kp| {
+            write_key_expression(w, key_information, kp, is_change, address_index)
+        })?;
         Ok(result)
     }
 }
@@ -1832,7 +1811,9 @@ impl ToDescriptor for DescriptorTemplate {
         address_index: u32,
     ) -> Result<String, ParseError> {
         let mut result = String::new();
-        self.write_to(&mut result, key_information, is_change, address_index)?;
+        self.render(&mut result, &mut |w, kp| {
+            write_key_expression(w, key_information, kp, is_change, address_index)
+        })?;
         Ok(result)
     }
 }
@@ -1842,34 +1823,6 @@ mod tests {
     use super::*;
 
     const H: u32 = HARDENED_INDEX;
-    const MAX_STEP: &str = "2147483647";
-    const MAX_STEP_H: &str = "2147483647'";
-
-    #[test]
-    fn test_parse_derivation_step_number() {
-        let test_cases_success = vec![
-            ("0", ("", 0)),
-            ("0'", ("", H)),
-            ("1", ("", 1)),
-            ("1'", ("", 1 + H)),
-            (MAX_STEP, ("", H - 1)),
-            (MAX_STEP_H, ("", H - 1 + H)),
-            // only ' is supported as hardened symbol, so this must leave the h or H unparsed
-            ("5h", ("h", 5)),
-            ("5H", ("H", 5)),
-        ];
-
-        for (input, expected) in test_cases_success {
-            let result = parse_derivation_step_number(input);
-            assert_eq!(result, Ok(expected));
-        }
-
-        let test_cases_err = vec!["", "a", stringify!(H), concat!(stringify!(H), "'")];
-
-        for input in test_cases_err {
-            assert!(parse_derivation_step_number(input).is_err());
-        }
-    }
 
     fn make_key_origin_info(fpr: u32, der_path: Vec<u32>) -> KeyOrigin {
         KeyOrigin {
@@ -1880,6 +1833,20 @@ mod tests {
 
     fn koi(key_origin_str: &str) -> KeyInformation {
         KeyInformation::try_from(key_origin_str).unwrap()
+    }
+
+    // Three distinct valid xpubs used by the wallet-policy validation tests.
+    const XPUB_A: &str = "tpubDE7NQymr4AFtcJXi9TaWZtrhAdy8QyKmT4U6b9qYByAxCzoyMJ8zw5d8xVLVpbTRAEqP8pVUxjLE2vDt1rSFjaiS8DSz1QcNZ8D1qxUMx1g";
+    const XPUB_B: &str = "tpubDFAqEGNyad35YgH8zxvxFZqNUoPtr5mDojs7wzbXQBHTZ4xHeVXG6w2HvsKvjBpaRpTmjYDjdPg5w2c6Wvu8QBkyMDrmBWdCyqkDM7reSsY";
+    const XPUB_C: &str = "tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P";
+
+    // `n` distinct KeyInformation entries (n <= 3) for policies that reference
+    // exactly that many keys.
+    fn distinct_keys(n: usize) -> Vec<KeyInformation> {
+        [XPUB_A, XPUB_B, XPUB_C][..n]
+            .iter()
+            .map(|s| koi(s))
+            .collect()
     }
 
     #[test]
@@ -1939,6 +1906,10 @@ mod tests {
             "@0/<0,1>/*",     // , instead of ;
             "@4294967296/**", // too large
             "0/**",
+            "@0/<0';1>/*",         // hardened first multipath index
+            "@0/<0;1'>/*",         // hardened second multipath index
+            "@0/<2147483648;1>/*", // first multipath index out of range
+            "@0/<0;2147483648>/*", // second multipath index out of range
         ];
 
         for input in test_cases_err {
@@ -2518,5 +2489,207 @@ mod tests {
         let out = dt.to_descriptor(&keys, true, 3).unwrap();
         let expected = format!("wsh(thresh(1,pk({}/1/3),s:pk({}/1/3)))", xpub_str, xpub_str);
         assert_eq!(out, expected);
+    }
+
+    // ----- BIP-388 compliance: parser-level rules -----
+
+    #[test]
+    fn test_multipath_indices_must_be_distinct() {
+        // A1: `/<NUM;NUM>/*` requires two distinct numbers.
+        assert_eq!(
+            parse_key_expression("@0/<5;5>/*", ParseContext::TopLevel),
+            Err(ParseError::NonDistinctMultipath)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(musig(@0,@1)/<3;3>/*)"),
+            Err(ParseError::NonDistinctMultipath)
+        );
+        // Distinct indices (and the `/**` shorthand) still parse.
+        assert!(parse_key_expression("@0/<0;1>/*", ParseContext::TopLevel).is_ok());
+        assert!(parse_key_expression("@0/**", ParseContext::TopLevel).is_ok());
+        assert!(parse_key_expression("@0/<9;3>/*", ParseContext::TopLevel).is_ok());
+    }
+
+    #[test]
+    fn test_multi_only_inside_sh_or_wsh() {
+        // A2: multi/sortedmulti are allowed only inside sh() or wsh().
+        for allowed in [
+            "sh(multi(2,@0/**,@1/**))",
+            "wsh(multi(2,@0/**,@1/**))",
+            "sh(wsh(multi(2,@0/**,@1/**)))",
+            "sh(sortedmulti(2,@0/**,@1/**))",
+            "wsh(sortedmulti(2,@0/**,@1/**))",
+        ] {
+            assert!(
+                DescriptorTemplate::from_str(allowed).is_ok(),
+                "should parse: {allowed}"
+            );
+        }
+        for rejected in [
+            "multi(2,@0/**,@1/**)",
+            "sortedmulti(2,@0/**,@1/**)",
+            "tr(@0/**,multi(2,@1/**,@2/**))",
+            "tr(@0/**,sortedmulti(2,@1/**,@2/**))",
+        ] {
+            assert_eq!(
+                DescriptorTemplate::from_str(rejected),
+                Err(ParseError::InvalidScriptContext),
+                "should be rejected: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multi_a_only_inside_tr() {
+        // A3: multi_a/sortedmulti_a are tapscript-only, so allowed only in tr().
+        assert!(DescriptorTemplate::from_str("tr(@0/**,multi_a(2,@1/**,@2/**))").is_ok());
+        assert!(DescriptorTemplate::from_str("tr(@0/**,sortedmulti_a(2,@1/**,@2/**))").is_ok());
+        for rejected in [
+            "multi_a(2,@0/**,@1/**)",
+            "sortedmulti_a(2,@0/**,@1/**)",
+            "wsh(multi_a(2,@0/**,@1/**))",
+            "sh(wsh(multi_a(2,@0/**,@1/**)))",
+        ] {
+            assert_eq!(
+                DescriptorTemplate::from_str(rejected),
+                Err(ParseError::InvalidScriptContext),
+                "should be rejected: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pkh_allowed_in_miniscript() {
+        // Per the chosen interpretation, `pkh` is valid miniscript both inside
+        // wsh and inside a taproot tree (the `c:pk_h` form).
+        assert!(DescriptorTemplate::from_str("wsh(pkh(@0/**))").is_ok());
+        assert!(DescriptorTemplate::from_str("tr(@0/**,pkh(@1/**))").is_ok());
+        assert!(DescriptorTemplate::from_str("wsh(or_d(pk(@0/**),pkh(@1/**)))").is_ok());
+    }
+
+    // ----- BIP-388 compliance: whole-policy validation in WalletPolicy::new -----
+
+    #[test]
+    fn test_policy_requires_key_placeholder() {
+        // B1: a policy with no key placeholder is rejected.
+        assert_eq!(
+            WalletPolicy::new("older(12345)", vec![]),
+            Err(ParseError::NoKeyPlaceholders)
+        );
+    }
+
+    #[test]
+    fn test_policy_key_index_and_count() {
+        // B2: an out-of-range index is rejected.
+        assert_eq!(
+            WalletPolicy::new("wsh(multi(2,@0/**,@2/**))", distinct_keys(2)),
+            Err(ParseError::InvalidKeyIndex)
+        );
+        // An unused key (count mismatch) is rejected.
+        assert_eq!(
+            WalletPolicy::new("pkh(@0/**)", distinct_keys(2)),
+            Err(ParseError::KeyIndexCountMismatch)
+        );
+        // Too few keys for the referenced placeholders is rejected.
+        assert_eq!(
+            WalletPolicy::new("wsh(sortedmulti(2,@0/**,@1/**))", distinct_keys(1)),
+            Err(ParseError::InvalidKeyIndex)
+        );
+        // Exactly the right keys, all used: OK.
+        assert!(WalletPolicy::new("wsh(sortedmulti(2,@0/**,@1/**))", distinct_keys(2)).is_ok());
+    }
+
+    #[test]
+    fn test_policy_placeholder_order_is_tolerated() {
+        // B5: the `@i` first-appearance ordering is a SHOULD in BIP-388, so an
+        // out-of-order template with a full, correct key set is accepted.
+        assert!(WalletPolicy::new("wsh(sortedmulti(2,@1/**,@0/**))", distinct_keys(2)).is_ok());
+    }
+
+    #[test]
+    fn test_policy_rejects_duplicate_keys() {
+        // B3: the public keys must be pairwise distinct.
+        assert_eq!(
+            WalletPolicy::new(
+                "wsh(sortedmulti(2,@0/**,@1/**))",
+                vec![koi(XPUB_A), koi(XPUB_A)]
+            ),
+            Err(ParseError::DuplicateKey)
+        );
+    }
+
+    #[test]
+    fn test_policy_multipath_must_be_disjoint() {
+        // B4: repeated use of the same placeholder must use disjoint multipaths.
+        // `/**` = `/<0;1>/*`, so both occurrences share {0,1}.
+        assert_eq!(
+            WalletPolicy::new("wsh(multi(2,@0/**,@0/**))", distinct_keys(1)),
+            Err(ParseError::OverlappingMultipath)
+        );
+        // Partial overlap ({0,1} vs {1,2}) is also rejected.
+        assert_eq!(
+            WalletPolicy::new("wsh(multi(2,@0/<0;1>/*,@0/<1;2>/*))", distinct_keys(1)),
+            Err(ParseError::OverlappingMultipath)
+        );
+        // Disjoint multipaths for the same placeholder are allowed.
+        assert!(WalletPolicy::new("wsh(multi(2,@0/<0;1>/*,@0/<2;3>/*))", distinct_keys(1)).is_ok());
+    }
+
+    #[test]
+    fn test_policy_musig_identity_is_by_index_set() {
+        // Two musig placeholders are "the same key" iff they have the same set
+        // of indices, regardless of order. Same set + same multipath overlaps.
+        assert_eq!(
+            WalletPolicy::new(
+                "tr(musig(@0,@1)/<0;1>/*,pk(musig(@1,@0)/<0;1>/*))",
+                distinct_keys(2)
+            ),
+            Err(ParseError::OverlappingMultipath)
+        );
+        // Same set but disjoint multipaths is fine.
+        assert!(WalletPolicy::new(
+            "tr(musig(@0,@1)/<0;1>/*,pk(musig(@1,@0)/<2;3>/*))",
+            distinct_keys(2)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_standard_bip388_policies_are_valid() {
+        // The canonical BIP-388 single-account templates, end to end through
+        // WalletPolicy::new (template + key vector), each with the right number
+        // of distinct keys.
+        let cases: &[(&str, usize)] = &[
+            ("pkh(@0/**)", 1),                      // BIP-44
+            ("sh(wpkh(@0/**))", 1),                 // BIP-49
+            ("wpkh(@0/**)", 1),                     // BIP-84
+            ("tr(@0/**)", 1),                       // BIP-86
+            ("wsh(sortedmulti(2,@0/**,@1/**))", 2), // BIP-48 P2WSH multisig
+            ("sh(wsh(sortedmulti(2,@0/**,@1/**)))", 2),
+        ];
+        for &(template, n) in cases {
+            assert!(
+                WalletPolicy::new(template, distinct_keys(n)).is_ok(),
+                "should be a valid policy: {template}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_wallet_policy_serialize_roundtrip() {
+        // Round-trip a real policy (with origin info) through serialize/deserialize.
+        let policy = WalletPolicy::new(
+            "wsh(sortedmulti(2,@0/**,@1/**))",
+            vec![
+                koi("[76223a6e/48'/1'/0'/1']tpubDE7NQymr4AFtcJXi9TaWZtrhAdy8QyKmT4U6b9qYByAxCzoyMJ8zw5d8xVLVpbTRAEqP8pVUxjLE2vDt1rSFjaiS8DSz1QcNZ8D1qxUMx1g"),
+                koi("[f5acc2fd/48'/1'/0'/1']tpubDFAqEGNyad35YgH8zxvxFZqNUoPtr5mDojs7wzbXQBHTZ4xHeVXG6w2HvsKvjBpaRpTmjYDjdPg5w2c6Wvu8QBkyMDrmBWdCyqkDM7reSsY"),
+            ],
+        )
+        .unwrap();
+
+        let bytes = policy.serialize();
+        let mut cursor = bitcoin::io::Cursor::new(bytes);
+        let decoded = WalletPolicy::deserialize(&mut cursor).expect("round-trip should succeed");
+        assert_eq!(policy, decoded);
     }
 }
