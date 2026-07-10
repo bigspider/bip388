@@ -674,17 +674,11 @@ fn parse_descriptor_template(input: &str) -> Result<DescriptorTemplate, ParseErr
     }
 }
 
-// Parses a derivation-step number like "44" or "44'".
-fn parse_derivation_step_number(input: &str) -> ParseResult<'_, u32> {
-    let (rest, num) = parse_number_up_to(input, HARDENED_INDEX - 1)?;
-    if let Some(rest) = rest.strip_prefix('\'') {
-        Ok((rest, num + HARDENED_INDEX))
-    } else {
-        Ok((rest, num))
-    }
-}
-
 // Parses the derivation suffix: /** or /<num1;num2>/*
+//
+// `num1`/`num2` are plain, unhardened derivation indices (0..=2147483647): a
+// trailing `'` is rejected, since these are the change/multipath steps of a key
+// derived from an xpub, which cannot be hardened.
 fn parse_derivation_suffix(input: &str) -> ParseResult<'_, (u32, u32)> {
     if !input.starts_with('/') {
         return Err(ParseError::InvalidSyntax);
@@ -694,11 +688,11 @@ fn parse_derivation_suffix(input: &str) -> ParseResult<'_, (u32, u32)> {
     if let Some(rest) = rest.strip_prefix("**") {
         Ok((rest, (0u32, 1u32)))
     } else if let Some(rest) = rest.strip_prefix('<') {
-        let (rest, num1) = parse_derivation_step_number(rest)?;
+        let (rest, num1) = parse_number_up_to(rest, HARDENED_INDEX - 1)?;
         if !rest.starts_with(';') {
             return Err(ParseError::InvalidSyntax);
         }
-        let (rest, num2) = parse_derivation_step_number(&rest[1..])?;
+        let (rest, num2) = parse_number_up_to(&rest[1..], HARDENED_INDEX - 1)?;
         if !rest.starts_with(">/*") {
             return Err(ParseError::InvalidSyntax);
         }
@@ -1703,34 +1697,6 @@ mod tests {
     use super::*;
 
     const H: u32 = HARDENED_INDEX;
-    const MAX_STEP: &str = "2147483647";
-    const MAX_STEP_H: &str = "2147483647'";
-
-    #[test]
-    fn test_parse_derivation_step_number() {
-        let test_cases_success = vec![
-            ("0", ("", 0)),
-            ("0'", ("", H)),
-            ("1", ("", 1)),
-            ("1'", ("", 1 + H)),
-            (MAX_STEP, ("", H - 1)),
-            (MAX_STEP_H, ("", H - 1 + H)),
-            // only ' is supported as hardened symbol, so this must leave the h or H unparsed
-            ("5h", ("h", 5)),
-            ("5H", ("H", 5)),
-        ];
-
-        for (input, expected) in test_cases_success {
-            let result = parse_derivation_step_number(input);
-            assert_eq!(result, Ok(expected));
-        }
-
-        let test_cases_err = vec!["", "a", stringify!(H), concat!(stringify!(H), "'")];
-
-        for input in test_cases_err {
-            assert!(parse_derivation_step_number(input).is_err());
-        }
-    }
 
     fn make_key_origin_info(fpr: u32, der_path: Vec<u32>) -> KeyOrigin {
         KeyOrigin {
@@ -1800,6 +1766,10 @@ mod tests {
             "@0/<0,1>/*",     // , instead of ;
             "@4294967296/**", // too large
             "0/**",
+            "@0/<0';1>/*",         // hardened first multipath index
+            "@0/<0;1'>/*",         // hardened second multipath index
+            "@0/<2147483648;1>/*", // first multipath index out of range
+            "@0/<0;2147483648>/*", // second multipath index out of range
         ];
 
         for input in test_cases_err {
