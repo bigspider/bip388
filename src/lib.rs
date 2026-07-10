@@ -568,10 +568,10 @@ impl<'a> Iterator for TapleavesIter<'a> {
 
 impl core::fmt::Display for TapTree {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            TapTree::Script(desc) => write!(f, "{}", desc),
-            TapTree::Branch(left, right) => write!(f, "{{{},{}}}", left, right),
-        }
+        let mut s = String::new();
+        self.render(&mut s, &mut write_placeholder_key)
+            .map_err(|_| core::fmt::Error)?;
+        f.write_str(&s)
     }
 }
 
@@ -1242,92 +1242,12 @@ impl FromStr for DescriptorTemplate {
     }
 }
 
-fn write_display_wrapper(
-    f: &mut core::fmt::Formatter<'_>,
-    ch: char,
-    inner: &DescriptorTemplate,
-) -> core::fmt::Result {
-    write!(f, "{}", ch)?;
-    if !inner.is_wrapper() {
-        write!(f, ":")?;
-    }
-    write!(f, "{}", inner)
-}
-
 impl core::fmt::Display for DescriptorTemplate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            DescriptorTemplate::Sh(inner) => write!(f, "sh({})", inner),
-            DescriptorTemplate::Wsh(inner) => write!(f, "wsh({})", inner),
-            DescriptorTemplate::Pkh(kp) => write!(f, "pkh({})", kp),
-            DescriptorTemplate::Wpkh(kp) => write!(f, "wpkh({})", kp),
-            DescriptorTemplate::Sortedmulti(k, kps) => {
-                write!(f, "sortedmulti({}", k)?;
-                for kp in kps {
-                    write!(f, ",{}", kp)?;
-                }
-                write!(f, ")")
-            }
-            DescriptorTemplate::Sortedmulti_a(k, kps) => {
-                write!(f, "sortedmulti_a({}", k)?;
-                for kp in kps {
-                    write!(f, ",{}", kp)?;
-                }
-                write!(f, ")")
-            }
-            DescriptorTemplate::Tr(kp, None) => write!(f, "tr({})", kp),
-            DescriptorTemplate::Tr(kp, Some(tree)) => write!(f, "tr({},{})", kp, tree),
-            DescriptorTemplate::Zero => write!(f, "0"),
-            DescriptorTemplate::One => write!(f, "1"),
-            DescriptorTemplate::Pk(kp) => write!(f, "pk({})", kp),
-            DescriptorTemplate::Pk_k(kp) => write!(f, "pk_k({})", kp),
-            DescriptorTemplate::Pk_h(kp) => write!(f, "pk_h({})", kp),
-            DescriptorTemplate::Older(n) => write!(f, "older({})", n),
-            DescriptorTemplate::After(n) => write!(f, "after({})", n),
-            DescriptorTemplate::Sha256(hash) => write!(f, "sha256({})", hex::encode(hash)),
-            DescriptorTemplate::Ripemd160(hash) => write!(f, "ripemd160({})", hex::encode(hash)),
-            DescriptorTemplate::Hash256(hash) => write!(f, "hash256({})", hex::encode(hash)),
-            DescriptorTemplate::Hash160(hash) => write!(f, "hash160({})", hex::encode(hash)),
-            DescriptorTemplate::Andor(x, y, z) => write!(f, "andor({},{},{})", x, y, z),
-            DescriptorTemplate::And_v(x, y) => write!(f, "and_v({},{})", x, y),
-            DescriptorTemplate::And_b(x, y) => write!(f, "and_b({},{})", x, y),
-            DescriptorTemplate::And_n(x, y) => write!(f, "and_n({},{})", x, y),
-            DescriptorTemplate::Or_b(x, y) => write!(f, "or_b({},{})", x, y),
-            DescriptorTemplate::Or_c(x, y) => write!(f, "or_c({},{})", x, y),
-            DescriptorTemplate::Or_d(x, y) => write!(f, "or_d({},{})", x, y),
-            DescriptorTemplate::Or_i(x, y) => write!(f, "or_i({},{})", x, y),
-            DescriptorTemplate::Thresh(k, descs) => {
-                write!(f, "thresh({}", k)?;
-                for desc in descs {
-                    write!(f, ",{}", desc)?;
-                }
-                write!(f, ")")
-            }
-            DescriptorTemplate::Multi(k, kps) => {
-                write!(f, "multi({}", k)?;
-                for kp in kps {
-                    write!(f, ",{}", kp)?;
-                }
-                write!(f, ")")
-            }
-            DescriptorTemplate::Multi_a(k, kps) => {
-                write!(f, "multi_a({}", k)?;
-                for kp in kps {
-                    write!(f, ",{}", kp)?;
-                }
-                write!(f, ")")
-            }
-            DescriptorTemplate::A(inner) => write_display_wrapper(f, 'a', inner),
-            DescriptorTemplate::S(inner) => write_display_wrapper(f, 's', inner),
-            DescriptorTemplate::C(inner) => write_display_wrapper(f, 'c', inner),
-            DescriptorTemplate::T(inner) => write_display_wrapper(f, 't', inner),
-            DescriptorTemplate::D(inner) => write_display_wrapper(f, 'd', inner),
-            DescriptorTemplate::V(inner) => write_display_wrapper(f, 'v', inner),
-            DescriptorTemplate::J(inner) => write_display_wrapper(f, 'j', inner),
-            DescriptorTemplate::N(inner) => write_display_wrapper(f, 'n', inner),
-            DescriptorTemplate::L(inner) => write_display_wrapper(f, 'l', inner),
-            DescriptorTemplate::U(inner) => write_display_wrapper(f, 'u', inner),
-        }
+        let mut s = String::new();
+        self.render(&mut s, &mut write_placeholder_key)
+            .map_err(|_| core::fmt::Error)?;
+        f.write_str(&s)
     }
 }
 
@@ -1552,54 +1472,59 @@ fn write_key_expression(
     }
 }
 
-// Writes a comma-separated list of key expressions to a buffer.
-fn write_key_expressions(
+// Writes a key expression in template form: the `@N/**` (or `musig(@N,...)`)
+// placeholder, exactly as `KeyExpression`'s `Display` renders it. This is the
+// key writer used by the `Display` impls.
+fn write_placeholder_key(w: &mut String, kp: &KeyExpression) -> Result<(), ParseError> {
+    use core::fmt::Write;
+    write!(w, "{}", kp).map_err(|_| ParseError::FormatError)
+}
+
+// Writes a comma-separated list of key expressions, formatting each with `write_key`.
+fn write_key_list(
     w: &mut String,
-    key_information: &[KeyInformation],
     kps: &[KeyExpression],
-    is_change: bool,
-    address_index: u32,
+    write_key: &mut impl FnMut(&mut String, &KeyExpression) -> Result<(), ParseError>,
 ) -> Result<(), ParseError> {
     for (i, kp) in kps.iter().enumerate() {
         if i > 0 {
             w.push(',');
         }
-        write_key_expression(w, key_information, kp, is_change, address_index)?;
+        write_key(w, kp)?;
     }
     Ok(())
 }
 
-// Writes a wrapper fragment to a buffer.
+// Writes a single-character wrapper prefix and its inner fragment, inserting a
+// ':' only when the inner fragment is not itself a wrapper (the `asc:` vs `a`
+// grammar).
 fn write_wrapper(
     w: &mut String,
-    name: &str,
+    ch: char,
     inner: &DescriptorTemplate,
-    key_information: &[KeyInformation],
-    is_change: bool,
-    address_index: u32,
+    write_key: &mut impl FnMut(&mut String, &KeyExpression) -> Result<(), ParseError>,
 ) -> Result<(), ParseError> {
-    w.push_str(name);
+    w.push(ch);
     if !inner.is_wrapper() {
         w.push(':');
     }
-    inner.write_to(w, key_information, is_change, address_index)
+    inner.render(w, write_key)
 }
 
 impl TapTree {
-    fn write_to(
+    // Renders this tap-tree to `w`, delegating each key placeholder to `write_key`.
+    fn render(
         &self,
         w: &mut String,
-        key_information: &[KeyInformation],
-        is_change: bool,
-        address_index: u32,
+        write_key: &mut impl FnMut(&mut String, &KeyExpression) -> Result<(), ParseError>,
     ) -> Result<(), ParseError> {
         match self {
-            TapTree::Script(desc) => desc.write_to(w, key_information, is_change, address_index),
+            TapTree::Script(desc) => desc.render(w, write_key),
             TapTree::Branch(left, right) => {
                 w.push('{');
-                left.write_to(w, key_information, is_change, address_index)?;
+                left.render(w, write_key)?;
                 w.push(',');
-                right.write_to(w, key_information, is_change, address_index)?;
+                right.render(w, write_key)?;
                 w.push('}');
                 Ok(())
             }
@@ -1608,52 +1533,56 @@ impl TapTree {
 }
 
 impl DescriptorTemplate {
-    fn write_to(
+    /// Renders this template to `w`. The structure (keywords, parentheses,
+    /// separators, wrappers) is written here; the formatting of each key
+    /// placeholder is delegated to `write_key`. Both the template form
+    /// (`Display`, via [`write_placeholder_key`]) and the concrete-descriptor
+    /// form (`ToDescriptor`, via [`write_key_expression`]) go through this
+    /// single renderer so the two can never drift apart.
+    fn render(
         &self,
         w: &mut String,
-        key_information: &[KeyInformation],
-        is_change: bool,
-        address_index: u32,
+        write_key: &mut impl FnMut(&mut String, &KeyExpression) -> Result<(), ParseError>,
     ) -> Result<(), ParseError> {
         use core::fmt::Write;
 
         match self {
             DescriptorTemplate::Sh(inner) => {
                 w.push_str("sh(");
-                inner.write_to(w, key_information, is_change, address_index)?;
+                inner.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Wsh(inner) => {
                 w.push_str("wsh(");
-                inner.write_to(w, key_information, is_change, address_index)?;
+                inner.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Pkh(kp) => {
                 w.push_str("pkh(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 w.push(')');
             }
             DescriptorTemplate::Wpkh(kp) => {
                 w.push_str("wpkh(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 w.push(')');
             }
             DescriptorTemplate::Sortedmulti(threshold, kps) => {
                 write!(w, "sortedmulti({},", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_expressions(w, key_information, kps, is_change, address_index)?;
+                write_key_list(w, kps, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Sortedmulti_a(threshold, kps) => {
                 write!(w, "sortedmulti_a({},", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_expressions(w, key_information, kps, is_change, address_index)?;
+                write_key_list(w, kps, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Tr(kp, tap_tree) => {
                 w.push_str("tr(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 if let Some(tree) = tap_tree {
                     w.push(',');
-                    tree.write_to(w, key_information, is_change, address_index)?;
+                    tree.render(w, write_key)?;
                 }
                 w.push(')');
             }
@@ -1661,17 +1590,17 @@ impl DescriptorTemplate {
             DescriptorTemplate::One => w.push('1'),
             DescriptorTemplate::Pk(kp) => {
                 w.push_str("pk(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 w.push(')');
             }
             DescriptorTemplate::Pk_k(kp) => {
                 w.push_str("pk_k(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 w.push(')');
             }
             DescriptorTemplate::Pk_h(kp) => {
                 w.push_str("pk_h(");
-                write_key_expression(w, key_information, kp, is_change, address_index)?;
+                write_key(w, kp)?;
                 w.push(')');
             }
             DescriptorTemplate::Older(n) => {
@@ -1702,110 +1631,90 @@ impl DescriptorTemplate {
             }
             DescriptorTemplate::Andor(x, y, z) => {
                 w.push_str("andor(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                y.write_to(w, key_information, is_change, address_index)?;
+                y.render(w, write_key)?;
                 w.push(',');
-                z.write_to(w, key_information, is_change, address_index)?;
+                z.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::And_v(x, y) => {
                 w.push_str("and_v(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                y.write_to(w, key_information, is_change, address_index)?;
+                y.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::And_b(x, y) => {
                 w.push_str("and_b(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                y.write_to(w, key_information, is_change, address_index)?;
+                y.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::And_n(x, y) => {
                 w.push_str("and_n(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                y.write_to(w, key_information, is_change, address_index)?;
+                y.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Or_b(x, z) => {
                 w.push_str("or_b(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                z.write_to(w, key_information, is_change, address_index)?;
+                z.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Or_c(x, z) => {
                 w.push_str("or_c(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                z.write_to(w, key_information, is_change, address_index)?;
+                z.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Or_d(x, z) => {
                 w.push_str("or_d(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                z.write_to(w, key_information, is_change, address_index)?;
+                z.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Or_i(x, z) => {
                 w.push_str("or_i(");
-                x.write_to(w, key_information, is_change, address_index)?;
+                x.render(w, write_key)?;
                 w.push(',');
-                z.write_to(w, key_information, is_change, address_index)?;
+                z.render(w, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Thresh(k, sub_templates) => {
                 write!(w, "thresh({}", k).map_err(|_| ParseError::FormatError)?;
                 for template in sub_templates {
                     w.push(',');
-                    template.write_to(w, key_information, is_change, address_index)?;
+                    template.render(w, write_key)?;
                 }
                 w.push(')');
             }
             DescriptorTemplate::Multi(threshold, kps) => {
                 write!(w, "multi({},", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_expressions(w, key_information, kps, is_change, address_index)?;
+                write_key_list(w, kps, write_key)?;
                 w.push(')');
             }
             DescriptorTemplate::Multi_a(threshold, kps) => {
                 write!(w, "multi_a({},", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_expressions(w, key_information, kps, is_change, address_index)?;
+                write_key_list(w, kps, write_key)?;
                 w.push(')');
             }
-            DescriptorTemplate::A(inner) => {
-                write_wrapper(w, "a", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::S(inner) => {
-                write_wrapper(w, "s", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::C(inner) => {
-                write_wrapper(w, "c", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::T(inner) => {
-                write_wrapper(w, "t", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::D(inner) => {
-                write_wrapper(w, "d", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::V(inner) => {
-                write_wrapper(w, "v", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::J(inner) => {
-                write_wrapper(w, "j", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::N(inner) => {
-                write_wrapper(w, "n", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::L(inner) => {
-                write_wrapper(w, "l", inner, key_information, is_change, address_index)?;
-            }
-            DescriptorTemplate::U(inner) => {
-                write_wrapper(w, "u", inner, key_information, is_change, address_index)?;
-            }
+            DescriptorTemplate::A(inner) => write_wrapper(w, 'a', inner, write_key)?,
+            DescriptorTemplate::S(inner) => write_wrapper(w, 's', inner, write_key)?,
+            DescriptorTemplate::C(inner) => write_wrapper(w, 'c', inner, write_key)?,
+            DescriptorTemplate::T(inner) => write_wrapper(w, 't', inner, write_key)?,
+            DescriptorTemplate::D(inner) => write_wrapper(w, 'd', inner, write_key)?,
+            DescriptorTemplate::V(inner) => write_wrapper(w, 'v', inner, write_key)?,
+            DescriptorTemplate::J(inner) => write_wrapper(w, 'j', inner, write_key)?,
+            DescriptorTemplate::N(inner) => write_wrapper(w, 'n', inner, write_key)?,
+            DescriptorTemplate::L(inner) => write_wrapper(w, 'l', inner, write_key)?,
+            DescriptorTemplate::U(inner) => write_wrapper(w, 'u', inner, write_key)?,
         }
         Ok(())
     }
@@ -1819,7 +1728,9 @@ impl ToDescriptor for TapTree {
         address_index: u32,
     ) -> Result<String, ParseError> {
         let mut result = String::new();
-        self.write_to(&mut result, key_information, is_change, address_index)?;
+        self.render(&mut result, &mut |w, kp| {
+            write_key_expression(w, key_information, kp, is_change, address_index)
+        })?;
         Ok(result)
     }
 }
@@ -1832,7 +1743,9 @@ impl ToDescriptor for DescriptorTemplate {
         address_index: u32,
     ) -> Result<String, ParseError> {
         let mut result = String::new();
-        self.write_to(&mut result, key_information, is_change, address_index)?;
+        self.render(&mut result, &mut |w, kp| {
+            write_key_expression(w, key_information, kp, is_change, address_index)
+        })?;
         Ok(result)
     }
 }
