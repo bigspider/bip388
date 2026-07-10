@@ -250,15 +250,15 @@ pub enum DescriptorTemplate {
 }
 
 pub struct DescriptorTemplateIter<'a> {
-    fragments: Vec<(&'a DescriptorTemplate, Option<&'a DescriptorTemplate>)>, // Store DescriptorTemplate and its associated leaf context
-    placeholders: Vec<(&'a KeyExpression, Option<&'a DescriptorTemplate>)>, // Placeholders also carry the leaf context
+    placeholders: alloc::vec::IntoIter<(&'a KeyExpression, Option<&'a DescriptorTemplate>)>,
 }
 
 impl<'a> From<&'a DescriptorTemplate> for DescriptorTemplateIter<'a> {
     fn from(desc: &'a DescriptorTemplate) -> Self {
+        let mut placeholders = Vec::new();
+        desc.collect_placeholders(None, &mut placeholders);
         DescriptorTemplateIter {
-            fragments: vec![(desc, None)], // Initially, there is no associated leaf context
-            placeholders: Vec::new(),
+            placeholders: placeholders.into_iter(),
         }
     }
 }
@@ -267,99 +267,7 @@ impl<'a> Iterator for DescriptorTemplateIter<'a> {
     type Item = (&'a KeyExpression, Option<&'a DescriptorTemplate>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while !self.placeholders.is_empty() || !self.fragments.is_empty() {
-            // If there are pending placeholders, pop and return one
-            if let Some(item) = self.placeholders.pop() {
-                return Some(item);
-            }
-
-            let next_fragment = self.fragments.pop();
-            if next_fragment.is_none() {
-                break;
-            }
-            let (frag, tapleaf_desc) = next_fragment.unwrap();
-            match frag {
-                DescriptorTemplate::Sh(sub)
-                | DescriptorTemplate::Wsh(sub)
-                | DescriptorTemplate::A(sub)
-                | DescriptorTemplate::S(sub)
-                | DescriptorTemplate::C(sub)
-                | DescriptorTemplate::T(sub)
-                | DescriptorTemplate::D(sub)
-                | DescriptorTemplate::V(sub)
-                | DescriptorTemplate::J(sub)
-                | DescriptorTemplate::N(sub)
-                | DescriptorTemplate::L(sub)
-                | DescriptorTemplate::U(sub) => {
-                    self.fragments.push((sub, tapleaf_desc));
-                }
-
-                DescriptorTemplate::Andor(sub1, sub2, sub3) => {
-                    self.fragments.push((sub3, tapleaf_desc));
-                    self.fragments.push((sub2, tapleaf_desc));
-                    self.fragments.push((sub1, tapleaf_desc));
-                }
-
-                DescriptorTemplate::Or_b(sub1, sub2)
-                | DescriptorTemplate::Or_c(sub1, sub2)
-                | DescriptorTemplate::Or_d(sub1, sub2)
-                | DescriptorTemplate::Or_i(sub1, sub2)
-                | DescriptorTemplate::And_v(sub1, sub2)
-                | DescriptorTemplate::And_b(sub1, sub2)
-                | DescriptorTemplate::And_n(sub1, sub2) => {
-                    self.fragments.push((sub2, tapleaf_desc));
-                    self.fragments.push((sub1, tapleaf_desc));
-                }
-
-                DescriptorTemplate::Tr(key, tree) => {
-                    self.placeholders.push((key, None));
-                    if let Some(t) = tree {
-                        let mut leaves: Vec<_> = t.tapleaves().collect();
-                        leaves.reverse();
-                        for leaf in leaves {
-                            self.fragments.push((leaf, Some(leaf)));
-                        }
-                    }
-                }
-
-                DescriptorTemplate::Pkh(key)
-                | DescriptorTemplate::Wpkh(key)
-                | DescriptorTemplate::Pk(key)
-                | DescriptorTemplate::Pk_k(key)
-                | DescriptorTemplate::Pk_h(key) => {
-                    return Some((key, tapleaf_desc));
-                }
-
-                DescriptorTemplate::Sortedmulti(_, keys)
-                | DescriptorTemplate::Sortedmulti_a(_, keys)
-                | DescriptorTemplate::Multi(_, keys)
-                | DescriptorTemplate::Multi_a(_, keys) => {
-                    // Push keys onto the keys stack in reverse order
-                    for key in keys.iter().rev() {
-                        self.placeholders.push((key, tapleaf_desc));
-                    }
-                }
-
-                DescriptorTemplate::Thresh(_, descs) => {
-                    for desc in descs.iter().rev() {
-                        self.fragments.push((desc, tapleaf_desc));
-                    }
-                }
-
-                DescriptorTemplate::Zero
-                | DescriptorTemplate::One
-                | DescriptorTemplate::Older(_)
-                | DescriptorTemplate::After(_)
-                | DescriptorTemplate::Sha256(_)
-                | DescriptorTemplate::Ripemd160(_)
-                | DescriptorTemplate::Hash256(_)
-                | DescriptorTemplate::Hash160(_) => {
-                    // nothing to do, there are no placeholders for these
-                }
-            }
-        }
-
-        None
+        self.placeholders.next()
     }
 }
 
@@ -369,132 +277,15 @@ impl<'a> Iterator for DescriptorTemplateIter<'a> {
 /// [`DescriptorTemplateIter`] (the immutable counterpart), so that in-place
 /// mutations preserve the canonical ordering expected by
 /// `are_key_derivations_canonical`.
-///
-/// Uses raw pointers internally to satisfy Rust's aliasing rules while still
-/// providing a safe interface through the `placeholders_mut` method.
 pub struct DescriptorTemplateIterMut<'a> {
-    fragments: Vec<*mut DescriptorTemplate>,
-    placeholders: Vec<*mut KeyExpression>,
-    _marker: core::marker::PhantomData<&'a mut DescriptorTemplate>,
+    placeholders: alloc::vec::IntoIter<&'a mut KeyExpression>,
 }
 
 impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
     type Item = &'a mut KeyExpression;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(ptr) = self.placeholders.pop() {
-                // SAFETY: ptr was derived from a uniquely-borrowed &mut KeyExpression
-                // that lives for 'a; no other reference to it exists.
-                return Some(unsafe { &mut *ptr });
-            }
-
-            let frag_ptr = self.fragments.pop()?;
-            // SAFETY: ptr was derived from a uniquely-borrowed &mut DescriptorTemplate
-            // that lives for 'a; we create only one &mut at a time per pointer.
-            let frag = unsafe { &mut *frag_ptr };
-
-            match frag {
-                DescriptorTemplate::Sh(sub)
-                | DescriptorTemplate::Wsh(sub)
-                | DescriptorTemplate::A(sub)
-                | DescriptorTemplate::S(sub)
-                | DescriptorTemplate::C(sub)
-                | DescriptorTemplate::T(sub)
-                | DescriptorTemplate::D(sub)
-                | DescriptorTemplate::V(sub)
-                | DescriptorTemplate::J(sub)
-                | DescriptorTemplate::N(sub)
-                | DescriptorTemplate::L(sub)
-                | DescriptorTemplate::U(sub) => {
-                    self.fragments.push(sub.as_mut() as *mut DescriptorTemplate);
-                }
-
-                DescriptorTemplate::Andor(sub1, sub2, sub3) => {
-                    self.fragments
-                        .push(sub3.as_mut() as *mut DescriptorTemplate);
-                    self.fragments
-                        .push(sub2.as_mut() as *mut DescriptorTemplate);
-                    self.fragments
-                        .push(sub1.as_mut() as *mut DescriptorTemplate);
-                }
-
-                DescriptorTemplate::Or_b(sub1, sub2)
-                | DescriptorTemplate::Or_c(sub1, sub2)
-                | DescriptorTemplate::Or_d(sub1, sub2)
-                | DescriptorTemplate::Or_i(sub1, sub2)
-                | DescriptorTemplate::And_v(sub1, sub2)
-                | DescriptorTemplate::And_b(sub1, sub2)
-                | DescriptorTemplate::And_n(sub1, sub2) => {
-                    self.fragments
-                        .push(sub2.as_mut() as *mut DescriptorTemplate);
-                    self.fragments
-                        .push(sub1.as_mut() as *mut DescriptorTemplate);
-                }
-
-                DescriptorTemplate::Tr(key, tree) => {
-                    self.placeholders.push(key as *mut KeyExpression);
-                    if let Some(t) = tree {
-                        // Traverse the TapTree to collect mutable pointers to all
-                        // leaves in left-to-right order (matching TapleavesIter),
-                        // then reverse so we pop them in the correct order.
-                        let mut leaf_ptrs: Vec<*mut DescriptorTemplate> = Vec::new();
-                        let mut stack: Vec<*mut TapTree> = vec![t as *mut TapTree];
-                        while let Some(node_ptr) = stack.pop() {
-                            // SAFETY: node_ptr is derived from a valid &mut TapTree
-                            // that lives for 'a; each node is visited exactly once.
-                            let node = unsafe { &mut *node_ptr };
-                            match node {
-                                TapTree::Script(dt) => {
-                                    leaf_ptrs.push(dt.as_mut() as *mut DescriptorTemplate);
-                                }
-                                TapTree::Branch(left, right) => {
-                                    stack.push(&mut **right as *mut TapTree);
-                                    stack.push(&mut **left as *mut TapTree);
-                                }
-                            }
-                        }
-                        leaf_ptrs.reverse();
-                        self.fragments.extend(leaf_ptrs);
-                    }
-                }
-
-                DescriptorTemplate::Pkh(key)
-                | DescriptorTemplate::Wpkh(key)
-                | DescriptorTemplate::Pk(key)
-                | DescriptorTemplate::Pk_k(key)
-                | DescriptorTemplate::Pk_h(key) => {
-                    // SAFETY: key is a field of frag which is valid for 'a.
-                    return Some(unsafe { &mut *(key as *mut KeyExpression) });
-                }
-
-                DescriptorTemplate::Sortedmulti(_, keys)
-                | DescriptorTemplate::Sortedmulti_a(_, keys)
-                | DescriptorTemplate::Multi(_, keys)
-                | DescriptorTemplate::Multi_a(_, keys) => {
-                    for key in keys.iter_mut().rev() {
-                        self.placeholders.push(key as *mut KeyExpression);
-                    }
-                }
-
-                DescriptorTemplate::Thresh(_, descs) => {
-                    for desc in descs.iter_mut().rev() {
-                        self.fragments.push(desc as *mut DescriptorTemplate);
-                    }
-                }
-
-                DescriptorTemplate::Zero
-                | DescriptorTemplate::One
-                | DescriptorTemplate::Older(_)
-                | DescriptorTemplate::After(_)
-                | DescriptorTemplate::Sha256(_)
-                | DescriptorTemplate::Ripemd160(_)
-                | DescriptorTemplate::Hash256(_)
-                | DescriptorTemplate::Hash160(_) => {
-                    // no key placeholders in terminal fragments
-                }
-            }
-        }
+        self.placeholders.next()
     }
 }
 
@@ -518,11 +309,169 @@ impl DescriptorTemplate {
     pub fn placeholders(&self) -> DescriptorTemplateIter<'_> {
         DescriptorTemplateIter::from(self)
     }
+
     pub fn placeholders_mut(&mut self) -> DescriptorTemplateIterMut<'_> {
+        let mut placeholders = Vec::new();
+        self.collect_placeholders_mut(&mut placeholders);
         DescriptorTemplateIterMut {
-            fragments: vec![self as *mut DescriptorTemplate],
-            placeholders: Vec::new(),
-            _marker: core::marker::PhantomData,
+            placeholders: placeholders.into_iter(),
+        }
+    }
+
+    /// Appends every key placeholder to `out` in left-to-right pre-order,
+    /// tagging each with the `tr(...)` tap-leaf it belongs to (`None` for the
+    /// taproot internal key and for keys outside any tap-tree). This single
+    /// recursive traversal backs [`DescriptorTemplateIter`];
+    /// [`Self::collect_placeholders_mut`] is its `&mut` twin and visits
+    /// fragments in the identical order.
+    fn collect_placeholders<'a>(
+        &'a self,
+        leaf_ctx: Option<&'a DescriptorTemplate>,
+        out: &mut Vec<(&'a KeyExpression, Option<&'a DescriptorTemplate>)>,
+    ) {
+        match self {
+            DescriptorTemplate::Sh(sub)
+            | DescriptorTemplate::Wsh(sub)
+            | DescriptorTemplate::A(sub)
+            | DescriptorTemplate::S(sub)
+            | DescriptorTemplate::C(sub)
+            | DescriptorTemplate::T(sub)
+            | DescriptorTemplate::D(sub)
+            | DescriptorTemplate::V(sub)
+            | DescriptorTemplate::J(sub)
+            | DescriptorTemplate::N(sub)
+            | DescriptorTemplate::L(sub)
+            | DescriptorTemplate::U(sub) => sub.collect_placeholders(leaf_ctx, out),
+
+            DescriptorTemplate::Andor(a, b, c) => {
+                a.collect_placeholders(leaf_ctx, out);
+                b.collect_placeholders(leaf_ctx, out);
+                c.collect_placeholders(leaf_ctx, out);
+            }
+
+            DescriptorTemplate::Or_b(a, b)
+            | DescriptorTemplate::Or_c(a, b)
+            | DescriptorTemplate::Or_d(a, b)
+            | DescriptorTemplate::Or_i(a, b)
+            | DescriptorTemplate::And_v(a, b)
+            | DescriptorTemplate::And_b(a, b)
+            | DescriptorTemplate::And_n(a, b) => {
+                a.collect_placeholders(leaf_ctx, out);
+                b.collect_placeholders(leaf_ctx, out);
+            }
+
+            DescriptorTemplate::Tr(key, tree) => {
+                out.push((key, None));
+                if let Some(tree) = tree {
+                    for leaf in tree.tapleaves() {
+                        leaf.collect_placeholders(Some(leaf), out);
+                    }
+                }
+            }
+
+            DescriptorTemplate::Pkh(key)
+            | DescriptorTemplate::Wpkh(key)
+            | DescriptorTemplate::Pk(key)
+            | DescriptorTemplate::Pk_k(key)
+            | DescriptorTemplate::Pk_h(key) => out.push((key, leaf_ctx)),
+
+            DescriptorTemplate::Sortedmulti(_, keys)
+            | DescriptorTemplate::Sortedmulti_a(_, keys)
+            | DescriptorTemplate::Multi(_, keys)
+            | DescriptorTemplate::Multi_a(_, keys) => {
+                for key in keys {
+                    out.push((key, leaf_ctx));
+                }
+            }
+
+            DescriptorTemplate::Thresh(_, subs) => {
+                for sub in subs {
+                    sub.collect_placeholders(leaf_ctx, out);
+                }
+            }
+
+            DescriptorTemplate::Zero
+            | DescriptorTemplate::One
+            | DescriptorTemplate::Older(_)
+            | DescriptorTemplate::After(_)
+            | DescriptorTemplate::Sha256(_)
+            | DescriptorTemplate::Ripemd160(_)
+            | DescriptorTemplate::Hash256(_)
+            | DescriptorTemplate::Hash160(_) => {}
+        }
+    }
+
+    /// `&mut` twin of [`Self::collect_placeholders`]: appends every placeholder
+    /// in the identical order (no leaf context is tracked). Kept safe by
+    /// descending through disjoint `&mut` sub-borrows rather than raw pointers.
+    fn collect_placeholders_mut<'a>(&'a mut self, out: &mut Vec<&'a mut KeyExpression>) {
+        match self {
+            DescriptorTemplate::Sh(sub)
+            | DescriptorTemplate::Wsh(sub)
+            | DescriptorTemplate::A(sub)
+            | DescriptorTemplate::S(sub)
+            | DescriptorTemplate::C(sub)
+            | DescriptorTemplate::T(sub)
+            | DescriptorTemplate::D(sub)
+            | DescriptorTemplate::V(sub)
+            | DescriptorTemplate::J(sub)
+            | DescriptorTemplate::N(sub)
+            | DescriptorTemplate::L(sub)
+            | DescriptorTemplate::U(sub) => sub.collect_placeholders_mut(out),
+
+            DescriptorTemplate::Andor(a, b, c) => {
+                a.collect_placeholders_mut(out);
+                b.collect_placeholders_mut(out);
+                c.collect_placeholders_mut(out);
+            }
+
+            DescriptorTemplate::Or_b(a, b)
+            | DescriptorTemplate::Or_c(a, b)
+            | DescriptorTemplate::Or_d(a, b)
+            | DescriptorTemplate::Or_i(a, b)
+            | DescriptorTemplate::And_v(a, b)
+            | DescriptorTemplate::And_b(a, b)
+            | DescriptorTemplate::And_n(a, b) => {
+                a.collect_placeholders_mut(out);
+                b.collect_placeholders_mut(out);
+            }
+
+            DescriptorTemplate::Tr(key, tree) => {
+                out.push(key);
+                if let Some(tree) = tree {
+                    tree.collect_leaf_placeholders_mut(out);
+                }
+            }
+
+            DescriptorTemplate::Pkh(key)
+            | DescriptorTemplate::Wpkh(key)
+            | DescriptorTemplate::Pk(key)
+            | DescriptorTemplate::Pk_k(key)
+            | DescriptorTemplate::Pk_h(key) => out.push(key),
+
+            DescriptorTemplate::Sortedmulti(_, keys)
+            | DescriptorTemplate::Sortedmulti_a(_, keys)
+            | DescriptorTemplate::Multi(_, keys)
+            | DescriptorTemplate::Multi_a(_, keys) => {
+                for key in keys.iter_mut() {
+                    out.push(key);
+                }
+            }
+
+            DescriptorTemplate::Thresh(_, subs) => {
+                for sub in subs.iter_mut() {
+                    sub.collect_placeholders_mut(out);
+                }
+            }
+
+            DescriptorTemplate::Zero
+            | DescriptorTemplate::One
+            | DescriptorTemplate::Older(_)
+            | DescriptorTemplate::After(_)
+            | DescriptorTemplate::Sha256(_)
+            | DescriptorTemplate::Ripemd160(_)
+            | DescriptorTemplate::Hash256(_)
+            | DescriptorTemplate::Hash160(_) => {}
         }
     }
 }
@@ -536,6 +485,19 @@ pub enum TapTree {
 impl TapTree {
     pub fn tapleaves(&self) -> TapleavesIter<'_> {
         TapleavesIter::new(self)
+    }
+
+    /// Appends the placeholders of every tap-leaf to `out`, mutably, in the
+    /// same left-to-right leaf order as [`TapleavesIter`]. Stays safe by
+    /// recursing through the tree's disjoint `&mut` sub-borrows.
+    fn collect_leaf_placeholders_mut<'a>(&'a mut self, out: &mut Vec<&'a mut KeyExpression>) {
+        match self {
+            TapTree::Script(desc) => desc.collect_placeholders_mut(out),
+            TapTree::Branch(left, right) => {
+                left.collect_leaf_placeholders_mut(out);
+                right.collect_leaf_placeholders_mut(out);
+            }
+        }
     }
 }
 
