@@ -1,6 +1,6 @@
 [package]
 name = "bip388"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Salvatore Ingala <salvatoshi@protonmail.com>"]
 edition = "2021"
 description = "A no_std, allocator-backed Rust crate for parsing, serializing and clear-signing BIP-388 wallet policies."
