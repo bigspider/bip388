@@ -48,6 +48,22 @@ const MAX_SERIALIZED_KEY_COUNT: usize = MAX_KEYS_MULTI_A;
 // Maximum length of a serialized BIP-32 derivation path.
 const MAX_BIP32_DERIVATION_PATH_LEN: usize = 32;
 
+// The lists sorted by this crate are naturally small. A simple insertion sort
+// avoids pulling the considerably larger slice-sorting machinery into
+// size-constrained builds.
+fn insertion_sort_by<T, F>(slice: &mut [T], mut compare: F)
+where
+    F: FnMut(&T, &T) -> core::cmp::Ordering,
+{
+    for i in 1..slice.len() {
+        let mut j = i;
+        while j > 0 && compare(&slice[j], &slice[j - 1]) == core::cmp::Ordering::Less {
+            slice.swap(j, j - 1);
+            j -= 1;
+        }
+    }
+}
+
 /// Error type for descriptor template / wallet policy parsing and serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseError {
@@ -1332,7 +1348,7 @@ fn validate_policy(
             KeyExpressionType::PlainKey(_) => kp.key_type.clone(),
             KeyExpressionType::Musig(indices) => {
                 let mut sorted = indices.clone();
-                sorted.sort_unstable();
+                insertion_sort_by(&mut sorted, Ord::cmp);
                 KeyExpressionType::Musig(sorted)
             }
         };

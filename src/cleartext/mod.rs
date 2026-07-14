@@ -30,7 +30,7 @@
 use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 
 use super::time::{format_seconds, format_utc_date};
-use super::{DescriptorTemplate, KeyExpression, KeyExpressionType};
+use super::{insertion_sort_by, DescriptorTemplate, KeyExpression, KeyExpressionType};
 
 #[cfg(any(test, feature = "cleartext-decode"))]
 mod decode;
@@ -423,7 +423,7 @@ impl DescriptorTemplate {
         }
 
         for pairs in pairs_per_key.values_mut() {
-            pairs.sort();
+            insertion_sort_by(pairs, Ord::cmp);
             for (i, &(n1, n2)) in pairs.iter().enumerate() {
                 let expected = (2 * i as u32, 2 * i as u32 + 1);
                 if (n1, n2) != expected {
@@ -570,7 +570,7 @@ impl ClearText for DescriptorTemplate {
                     // descriptor rather than panicking.
                     _ => return (vec![self.to_string()], false),
                 };
-                leaves.sort_by(|a, b| a.display_cmp(b));
+                insertion_sort_by(&mut leaves, TapleafClass::display_cmp);
                 let mut descriptions = vec![primary_path];
                 let mut all_leaves_have_cleartext = true;
                 for leaf in leaves {
