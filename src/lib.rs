@@ -1134,8 +1134,10 @@ fn parse_n_subscripts<const N: usize>(
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
-    let array: [DescriptorTemplate; N] =
-        scripts.try_into().expect("loop pushed exactly N elements");
+    let array: [DescriptorTemplate; N] = match scripts.try_into() {
+        Ok(array) => array,
+        Err(_) => unreachable!("loop pushed exactly N elements"),
+    };
     Ok((&rest[1..], array))
 }
 
