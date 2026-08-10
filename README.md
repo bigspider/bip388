@@ -1,3 +1,8 @@
+> [!WARNING]
+> **Status: Experimental**
+> 
+> This crate is experimental and not recommended for production use.
+
 # `bip388`
 
 [![crates.io](https://img.shields.io/crates/v/bip388.svg)](https://crates.io/crates/bip388)
