@@ -297,7 +297,7 @@ pub struct DescriptorTemplateIter<'a> {
 impl<'a> From<&'a DescriptorTemplate> for DescriptorTemplateIter<'a> {
     fn from(desc: &'a DescriptorTemplate) -> Self {
         let mut placeholders = Vec::new();
-        desc.collect_placeholders(None, &mut placeholders);
+        desc.visit_placeholders(None, &mut |key, leaf| placeholders.push((key, leaf)));
         DescriptorTemplateIter {
             placeholders: placeholders.into_iter(),
         }
@@ -359,16 +359,16 @@ impl DescriptorTemplate {
         }
     }
 
-    /// Appends every key placeholder to `out` in left-to-right pre-order,
+    /// Visits every key placeholder in left-to-right pre-order,
     /// tagging each with the `tr(...)` tap-leaf it belongs to (`None` for the
     /// taproot internal key and for keys outside any tap-tree). This single
     /// recursive traversal backs [`DescriptorTemplateIter`];
     /// [`Self::collect_placeholders_mut`] is its `&mut` twin and visits
     /// fragments in the identical order.
-    fn collect_placeholders<'a>(
+    fn visit_placeholders<'a>(
         &'a self,
         leaf_ctx: Option<&'a DescriptorTemplate>,
-        out: &mut Vec<(&'a KeyExpression, Option<&'a DescriptorTemplate>)>,
+        visit: &mut dyn FnMut(&'a KeyExpression, Option<&'a DescriptorTemplate>),
     ) {
         match self {
             DescriptorTemplate::Sh(sub)
@@ -382,12 +382,12 @@ impl DescriptorTemplate {
             | DescriptorTemplate::J(sub)
             | DescriptorTemplate::N(sub)
             | DescriptorTemplate::L(sub)
-            | DescriptorTemplate::U(sub) => sub.collect_placeholders(leaf_ctx, out),
+            | DescriptorTemplate::U(sub) => sub.visit_placeholders(leaf_ctx, visit),
 
             DescriptorTemplate::Andor(a, b, c) => {
-                a.collect_placeholders(leaf_ctx, out);
-                b.collect_placeholders(leaf_ctx, out);
-                c.collect_placeholders(leaf_ctx, out);
+                a.visit_placeholders(leaf_ctx, visit);
+                b.visit_placeholders(leaf_ctx, visit);
+                c.visit_placeholders(leaf_ctx, visit);
             }
 
             DescriptorTemplate::Or_b(a, b)
@@ -397,15 +397,15 @@ impl DescriptorTemplate {
             | DescriptorTemplate::And_v(a, b)
             | DescriptorTemplate::And_b(a, b)
             | DescriptorTemplate::And_n(a, b) => {
-                a.collect_placeholders(leaf_ctx, out);
-                b.collect_placeholders(leaf_ctx, out);
+                a.visit_placeholders(leaf_ctx, visit);
+                b.visit_placeholders(leaf_ctx, visit);
             }
 
             DescriptorTemplate::Tr(key, tree) => {
-                out.push((key, None));
+                visit(key, None);
                 if let Some(tree) = tree {
                     for leaf in tree.tapleaves() {
-                        leaf.collect_placeholders(Some(leaf), out);
+                        leaf.visit_placeholders(Some(leaf), visit);
                     }
                 }
             }
@@ -414,20 +414,20 @@ impl DescriptorTemplate {
             | DescriptorTemplate::Wpkh(key)
             | DescriptorTemplate::Pk(key)
             | DescriptorTemplate::Pk_k(key)
-            | DescriptorTemplate::Pk_h(key) => out.push((key, leaf_ctx)),
+            | DescriptorTemplate::Pk_h(key) => visit(key, leaf_ctx),
 
             DescriptorTemplate::Sortedmulti(_, keys)
             | DescriptorTemplate::Sortedmulti_a(_, keys)
             | DescriptorTemplate::Multi(_, keys)
             | DescriptorTemplate::Multi_a(_, keys) => {
                 for key in keys {
-                    out.push((key, leaf_ctx));
+                    visit(key, leaf_ctx);
                 }
             }
 
             DescriptorTemplate::Thresh(_, subs) => {
                 for sub in subs {
-                    sub.collect_placeholders(leaf_ctx, out);
+                    sub.visit_placeholders(leaf_ctx, visit);
                 }
             }
 
@@ -442,7 +442,7 @@ impl DescriptorTemplate {
         }
     }
 
-    /// `&mut` twin of [`Self::collect_placeholders`]: appends every placeholder
+    /// `&mut` twin of [`Self::visit_placeholders`]: appends every placeholder
     /// in the identical order (no leaf context is tracked). Kept safe by
     /// descending through disjoint `&mut` sub-borrows rather than raw pointers.
     fn collect_placeholders_mut<'a>(&'a mut self, out: &mut Vec<&'a mut KeyExpression>) {
@@ -1313,8 +1313,9 @@ fn validate_policy(
 ) -> Result<(), ParseError> {
     use alloc::collections::{BTreeMap, BTreeSet};
 
-    // Collect the placeholders once, in traversal order.
-    let placeholders: Vec<&KeyExpression> = template.placeholders().map(|(kp, _)| kp).collect();
+    // Collect only key references, without the iterator's leaf-context buffer.
+    let mut placeholders = Vec::new();
+    template.visit_placeholders(None, &mut |key, _| placeholders.push(key));
 
     // B1: a wallet policy must have at least one key placeholder.
     if placeholders.is_empty() {
