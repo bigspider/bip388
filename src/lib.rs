@@ -1426,6 +1426,16 @@ impl WalletPolicy {
         &self.descriptor_template_raw
     }
 
+    /// Expands this policy's template using its own key information.
+    /// Selects the receive or change branch and substitutes `address_index`
+    /// for the wildcard; the output retains extended public keys.
+    /// Returns [`ParseError::NumberOutOfRange`] if `address_index` exceeds
+    /// `0x7fffffff`, the maximum unhardened derivation index.
+    pub fn to_descriptor(&self, is_change: bool, address_index: u32) -> Result<String, ParseError> {
+        self.descriptor_template
+            .to_descriptor(&self.key_information, is_change, address_index)
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
         // `consensus_encode` only fails when its writer fails. Writing to a `Vec`
         // is infallible, so all `expect`s below are unreachable in practice.
@@ -2573,6 +2583,21 @@ mod tests {
         let out = dt.to_descriptor(&keys, true, 3).unwrap();
         let expected = format!("wsh(thresh(1,pk({}/1/3),s:pk({}/1/3)))", xpub_str, xpub_str);
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_wallet_policy_to_descriptor() {
+        let policy = WalletPolicy::new("wpkh(@0/<2;3>/*)", distinct_keys(1)).unwrap();
+        for (is_change, branch) in [(false, 2), (true, 3)] {
+            assert_eq!(
+                policy.to_descriptor(is_change, 7).unwrap(),
+                format!("wpkh({}/{}/7)", XPUB_A, branch)
+            );
+        }
+        assert_eq!(
+            policy.to_descriptor(false, HARDENED_INDEX),
+            Err(ParseError::NumberOutOfRange)
+        );
     }
 
     #[test]
