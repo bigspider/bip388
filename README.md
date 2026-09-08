@@ -160,6 +160,10 @@ tap-trees when the caller supplies the key information separately.
 `get_segwit_version()` reports whether the policy is Legacy, SegWit v0 or
 Taproot.
 
+`KeyInformation` and `KeyOrigin` implement `FromStr`, so they can be parsed with
+`.parse()` like `DescriptorTemplate`. Their `TryFrom<&str>` implementations also
+remain available.
+
 ### Serialization format
 
 `WalletPolicy::serialize` / `deserialize` use a compact binary encoding (Bitcoin
