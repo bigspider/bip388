@@ -1,4 +1,7 @@
-use alloc::{format, string::String, string::ToString, vec::Vec};
+#[cfg(any(test, feature = "cleartext-decode"))]
+use alloc::vec::Vec;
+use alloc::{format, string::String};
+use core::fmt::Write;
 
 /// Formats a Unix timestamp as a UTC date or datetime string.
 /// When the time component is midnight (00:00:00 UTC), returns `"YYYY-MM-DD"`.
@@ -94,7 +97,7 @@ pub(super) fn format_seconds(secs: u32) -> String {
     let hours = (secs % 86400) / 3600;
     let minutes = (secs % 3600) / 60;
     let seconds = secs % 60;
-    let mut parts: Vec<String> = Vec::new();
+    let mut result = String::new();
     for (value, singular, plural) in [
         (days, "day", "days"),
         (hours, "hour", "hours"),
@@ -102,15 +105,18 @@ pub(super) fn format_seconds(secs: u32) -> String {
         (seconds, "second", "seconds"),
     ] {
         if value > 0 {
+            if !result.is_empty() {
+                result.push(' ');
+            }
             let unit = if value == 1 { singular } else { plural };
-            parts.push(format!("{} {}", value, unit));
+            // Formatting integers and string slices into a String is infallible.
+            let _ = write!(result, "{} {}", value, unit);
         }
     }
-    if parts.is_empty() {
-        "0 seconds".to_string()
-    } else {
-        parts.join(" ")
+    if result.is_empty() {
+        result.push_str("0 seconds");
     }
+    result
 }
 
 /// Parses a human-readable duration string as produced by [`format_seconds`].
@@ -281,6 +287,10 @@ mod tests {
         assert_eq!(format_seconds(93784), "1 day 2 hours 3 minutes 4 seconds");
         // only hours and seconds, no days or minutes
         assert_eq!(format_seconds(3601), "1 hour 1 second");
+        assert_eq!(
+            format_seconds(u32::MAX),
+            "49710 days 6 hours 28 minutes 15 seconds"
+        );
     }
 
     // ── parse_relative_time_to_seconds ───────────────────────────────────────
