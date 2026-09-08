@@ -76,7 +76,7 @@ pub enum ParseError {
     InvalidHex,
     /// A key, xpub, fingerprint, hash, or compressed-key byte was invalid.
     InvalidKey,
-    /// A numeric literal was out of range or had illegal leading zeros.
+    /// A numeric value was out of range or a literal had illegal leading zeros.
     NumberOutOfRange,
     /// A data field was the wrong length.
     InvalidLength,
@@ -672,6 +672,9 @@ impl TryFrom<&str> for KeyInformation {
 }
 
 pub trait ToDescriptor {
+    /// Expands key placeholders for the selected branch and address index.
+    /// Returns [`ParseError::NumberOutOfRange`] if `address_index` exceeds
+    /// `0x7fffffff`, the maximum unhardened derivation index.
     fn to_descriptor(
         &self,
         key_information: &[KeyInformation],
@@ -1815,6 +1818,9 @@ impl ToDescriptor for TapTree {
         is_change: bool,
         address_index: u32,
     ) -> Result<String, ParseError> {
+        if address_index >= HARDENED_INDEX {
+            return Err(ParseError::NumberOutOfRange);
+        }
         let mut result = String::new();
         self.render(&mut result, &mut |w, kp| {
             write_key_expression(w, key_information, kp, is_change, address_index)
@@ -1830,6 +1836,9 @@ impl ToDescriptor for DescriptorTemplate {
         is_change: bool,
         address_index: u32,
     ) -> Result<String, ParseError> {
+        if address_index >= HARDENED_INDEX {
+            return Err(ParseError::NumberOutOfRange);
+        }
         let mut result = String::new();
         self.render(&mut result, &mut |w, kp| {
             write_key_expression(w, key_information, kp, is_change, address_index)
@@ -2539,6 +2548,28 @@ mod tests {
         let out = dt.to_descriptor(&keys, true, 3).unwrap();
         let expected = format!("wsh(thresh(1,pk({}/1/3),s:pk({}/1/3)))", xpub_str, xpub_str);
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_to_descriptor_address_index_bounds() {
+        let keys = distinct_keys(2);
+        for template in ["pk(@0/**)", "tr(musig(@0,@1)/**)", "0"] {
+            let dt = DescriptorTemplate::from_str(template).unwrap();
+            let tree = TapTree::Script(Box::new(dt.clone()));
+            for descriptor in [&dt as &dyn ToDescriptor, &tree] {
+                for is_change in [false, true] {
+                    for index in [0, HARDENED_INDEX - 1] {
+                        assert!(descriptor.to_descriptor(&keys, is_change, index).is_ok());
+                    }
+                    for index in [HARDENED_INDEX, u32::MAX] {
+                        assert_eq!(
+                            descriptor.to_descriptor(&keys, is_change, index),
+                            Err(ParseError::NumberOutOfRange)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // ----- BIP-388 compliance: parser-level rules -----
