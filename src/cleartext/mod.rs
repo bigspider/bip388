@@ -395,6 +395,8 @@ pub trait ClearText {
     /// lazy iterator over all structurally distinct instances that would produce
     /// the same cleartext output. The number of yielded instances is at most
     /// `confusion_score()`.
+    /// At most 64 taproot leaf descriptions may follow the key-path description;
+    /// larger inputs return [`CleartextDecodeError::TooManyLeaves`].
     #[cfg(any(test, feature = "cleartext-decode"))]
     fn from_cleartext(
         descriptions: &[&str],
@@ -842,6 +844,20 @@ mod tests {
                 t
             );
         }
+    }
+
+    #[test]
+    fn test_from_cleartext_leaf_count_limit() {
+        let mut descriptions = vec!["Main path: spendable by @0"];
+        descriptions.extend_from_slice(&["@1 must sign"; 64]);
+        // Check acceptance without enumerating the enormous candidate set.
+        assert!(DescriptorTemplate::from_cleartext(&descriptions).is_ok());
+
+        descriptions.push("@1 must sign");
+        assert!(matches!(
+            DescriptorTemplate::from_cleartext(&descriptions),
+            Err(super::CleartextDecodeError::TooManyLeaves)
+        ));
     }
 
     #[test]

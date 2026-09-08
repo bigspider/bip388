@@ -23,11 +23,17 @@ use super::{
     SEQUENCE_LOCKTIME_TYPE_FLAG, TAPLEAF_SPECS, TOP_LEVEL_SPECS,
 };
 
+// Tree enumeration uses a u64 mask for all leaves except the pinned first leaf.
+// The mask range's exclusive upper bound must also fit in u64.
+const MAX_TAPROOT_LEAVES: usize = u64::BITS as usize;
+
 /// Error type for `from_cleartext`.
 #[derive(Debug)]
 pub enum CleartextDecodeError {
     /// The input descriptions slice was empty.
     EmptyInput,
+    /// More than 64 taproot leaf descriptions were supplied.
+    TooManyLeaves,
     /// The cleartext string could not be matched to any known pattern.
     UnrecognizedPattern,
     /// A descriptor template string embedded in the cleartext could not be parsed.
@@ -633,6 +639,12 @@ fn enumerate_taptrees_indices(
 pub(super) fn from_cleartext_impl(
     descriptions: &[&str],
 ) -> Result<Box<dyn Iterator<Item = DescriptorTemplate>>, CleartextDecodeError> {
+    // The first description is the key path; each remaining one is a leaf.
+    // Check before parsing or constructing the lazy tree iterator so oversized
+    // inputs produce an error rather than a shift overflow during iteration.
+    if descriptions.len() > MAX_TAPROOT_LEAVES + 1 {
+        return Err(CleartextDecodeError::TooManyLeaves);
+    }
     // Decoding is case-insensitive: lower-case the whole input here, and the
     // pattern literals in `parse_spec_parts` / `parse_timelock`, so the encoder's
     // `capitalize_first` (and any other case variation) is undone uniformly. The

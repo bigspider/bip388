@@ -444,6 +444,11 @@ would produce the given cleartext, enumerating taproot tree topologies along the
 way (so the number of yielded instances corresponds to the confusion score, up to
 its over-counting). Errors are reported via `CleartextDecodeError`.
 
+The decoder accepts at most 64 taproot leaf descriptions after the key-path
+description; larger inputs return `CleartextDecodeError::TooManyLeaves` before
+enumeration. This is a bitmask representation limit, not a practical bound on
+recovery time or memory use.
+
 This direction is intentionally **excluded from the default build**.
 Decoding is needed off-device - for the crate's own round-trip tests, and for
 host-side tooling to recover from a possibly lost descriptor template by enumerating
