@@ -146,13 +146,16 @@ registration, so it is preserved byte-for-byte (`descriptor_template_raw()`)
 rather than re-derived through `Display`, ensuring the parsed AST can never drift
 from the bytes that were authenticated.
 
-The [`ToDescriptor`](src/lib.rs) trait turns a template (with its key info) into
-a concrete, fully-derived descriptor for a specific address:
+`WalletPolicy::to_descriptor` expands the template using the policy's own keys
+and selects a branch and address index. The output retains extended public keys
+with concrete derivation paths:
 
 ```rust
-let descriptor = policy.descriptor_template()
-    .to_descriptor(policy.key_information(), /*is_change=*/ false, /*address_index=*/ 0)?;
+let descriptor = policy.to_descriptor(/*is_change=*/ false, /*address_index=*/ 0)?;
 ```
+
+The [`ToDescriptor`](src/lib.rs) trait also supports standalone templates and
+tap-trees when the caller supplies the key information separately.
 
 `get_segwit_version()` reports whether the policy is Legacy, SegWit v0 or
 Taproot.
