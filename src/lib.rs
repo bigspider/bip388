@@ -1048,7 +1048,8 @@ fn parse_hex20_fragment<'a>(
     if input.len() < 40 {
         return Err(ParseError::InvalidLength);
     }
-    let bytes = <[u8; 20]>::from_hex(&input[..40]).map_err(|_| ParseError::InvalidHex)?;
+    let hex = input.get(..40).ok_or(ParseError::InvalidHex)?;
+    let bytes = <[u8; 20]>::from_hex(hex).map_err(|_| ParseError::InvalidHex)?;
     let rest = &input[40..];
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
@@ -1064,7 +1065,8 @@ fn parse_hex32_fragment<'a>(
     if input.len() < 64 {
         return Err(ParseError::InvalidLength);
     }
-    let bytes = <[u8; 32]>::from_hex(&input[..64]).map_err(|_| ParseError::InvalidHex)?;
+    let hex = input.get(..64).ok_or(ParseError::InvalidHex)?;
+    let bytes = <[u8; 32]>::from_hex(hex).map_err(|_| ParseError::InvalidHex)?;
     let rest = &input[64..];
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
@@ -2309,6 +2311,24 @@ mod tests {
             DescriptorTemplate::from_str("tr(@0/**,wsh(pk(musig(@1,@2)/**)))"),
             Err(ParseError::InvalidScriptContext)
         );
+    }
+
+    #[test]
+    fn test_hash_fragments_reject_non_ascii_without_panicking() {
+        for (fragment, hex_len) in [
+            ("ripemd160", 40),
+            ("hash160", 40),
+            ("sha256", 64),
+            ("hash256", 64),
+        ] {
+            let input = format!("wsh({}({}é))", fragment, "0".repeat(hex_len - 1));
+            assert_eq!(
+                DescriptorTemplate::from_str(&input),
+                Err(ParseError::InvalidHex),
+                "{}",
+                input
+            );
+        }
     }
 
     #[test]
