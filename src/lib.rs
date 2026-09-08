@@ -231,7 +231,7 @@ impl KeyExpression {
 
     /// Returns the key indices for a musig key expression.
     /// Returns `None` for plain key expressions.
-    pub fn musig_key_indices(&self) -> Option<&Vec<u32>> {
+    pub fn musig_key_indices(&self) -> Option<&[u32]> {
         match &self.key_type {
             KeyExpressionType::Musig(indices) => Some(indices),
             KeyExpressionType::PlainKey(_) => None,
@@ -588,10 +588,10 @@ impl core::fmt::Display for KeyOrigin {
     }
 }
 
-impl core::convert::TryFrom<&str> for KeyOrigin {
-    type Error = ParseError;
+impl FromStr for KeyOrigin {
+    type Err = ParseError;
 
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         // parse a string in the form "76223a6e/48'/1'/0'/1'"
         // the key origin info between [] is optional and might not be present
         if s.is_empty() {
@@ -606,11 +606,19 @@ impl core::convert::TryFrom<&str> for KeyOrigin {
             u32::from_str_radix(fingerprint_str, 16).map_err(|_| ParseError::InvalidKey)?;
         let derivation_path = parts
             .map(|x| ChildNumber::from_str(x).map_err(|_| ParseError::InvalidKey))
-            .collect::<Result<Vec<ChildNumber>, Self::Error>>()?;
+            .collect::<Result<Vec<ChildNumber>, Self::Err>>()?;
         Ok(KeyOrigin {
             fingerprint,
             derivation_path,
         })
+    }
+}
+
+impl TryFrom<&str> for KeyOrigin {
+    type Error = ParseError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
     }
 }
 
@@ -651,16 +659,16 @@ impl core::fmt::Display for KeyExpression {
     }
 }
 
-impl TryFrom<&str> for KeyInformation {
-    type Error = ParseError;
+impl FromStr for KeyInformation {
+    type Err = ParseError;
 
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.is_empty() {
             return Err(ParseError::EmptyInput);
         }
         let (origin_info, pubkey_pos) = if s.starts_with('[') {
             let end = s.find(']').ok_or(ParseError::InvalidKey)?;
-            (Some(KeyOrigin::try_from(&s[1..end])?), end + 1)
+            (Some(KeyOrigin::from_str(&s[1..end])?), end + 1)
         } else {
             (None, 0)
         };
@@ -669,6 +677,14 @@ impl TryFrom<&str> for KeyInformation {
             pubkey,
             origin_info,
         })
+    }
+}
+
+impl TryFrom<&str> for KeyInformation {
+    type Error = ParseError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
     }
 }
 
@@ -1903,7 +1919,7 @@ mod tests {
     }
 
     fn koi(key_origin_str: &str) -> KeyInformation {
-        KeyInformation::try_from(key_origin_str).unwrap()
+        key_origin_str.parse().unwrap()
     }
 
     // Three distinct valid xpubs used by the wallet-policy validation tests.
