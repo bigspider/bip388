@@ -46,6 +46,7 @@ const MAX_DESCRIPTOR_TEMPLATE_LEN: usize = 4096;
 const MAX_SERIALIZED_KEY_COUNT: usize = MAX_KEYS_MULTI_A;
 // Maximum BIP-32 path length, including the final change/address-index steps.
 const MAX_BIP32_DERIVATION_PATH_LEN: usize = 32;
+const MAX_KEY_ORIGIN_PATH_LEN: usize = MAX_BIP32_DERIVATION_PATH_LEN - 2;
 
 // The lists sorted by this crate are naturally small. A simple insertion sort
 // avoids pulling the considerably larger slice-sorting machinery into
@@ -591,6 +592,8 @@ impl core::fmt::Display for KeyOrigin {
 impl FromStr for KeyOrigin {
     type Err = ParseError;
 
+    /// Parses an origin with at most 30 derivation steps, reserving two steps
+    /// for the policy's change and address indices.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // parse a string in the form "76223a6e/48'/1'/0'/1'"
         // the key origin info between [] is optional and might not be present
@@ -604,9 +607,14 @@ impl FromStr for KeyOrigin {
         }
         let fingerprint =
             u32::from_str_radix(fingerprint_str, 16).map_err(|_| ParseError::InvalidKey)?;
-        let derivation_path = parts
-            .map(|x| ChildNumber::from_str(x).map_err(|_| ParseError::InvalidKey))
-            .collect::<Result<Vec<ChildNumber>, Self::Err>>()?;
+        let mut derivation_path = Vec::new();
+        for part in parts {
+            if derivation_path.len() == MAX_KEY_ORIGIN_PATH_LEN {
+                return Err(ParseError::InvalidLength);
+            }
+            let step = ChildNumber::from_str(part).map_err(|_| ParseError::InvalidKey)?;
+            derivation_path.push(step);
+        }
         Ok(KeyOrigin {
             fingerprint,
             derivation_path,
@@ -1418,7 +1426,7 @@ impl WalletPolicy {
         }
         for key in &key_information {
             if let Some(origin) = &key.origin_info {
-                if origin.derivation_path.len() > MAX_BIP32_DERIVATION_PATH_LEN - 2 {
+                if origin.derivation_path.len() > MAX_KEY_ORIGIN_PATH_LEN {
                     return Err(ParseError::InvalidLength);
                 }
             }
@@ -1530,7 +1538,7 @@ impl WalletPolicy {
                     let fingerprint = u32::from_be_bytes(fp_buf);
                     let VarInt(dp_len) = VarInt::consensus_decode(r)?;
                     // keys used in wallet policies must leave space for the final change/address_index derivation steps
-                    if dp_len > (MAX_BIP32_DERIVATION_PATH_LEN - 2) as u64 {
+                    if dp_len > MAX_KEY_ORIGIN_PATH_LEN as u64 {
                         return Err(encode::Error::ParseFailed("Derivation path too long"));
                     }
                     let mut derivation_path = Vec::with_capacity(dp_len as usize);
@@ -1969,6 +1977,28 @@ mod tests {
 
         for input in test_cases_err {
             assert!(KeyOrigin::try_from(input).is_err());
+        }
+    }
+
+    #[test]
+    fn test_key_origin_path_length_limit() {
+        for length in [MAX_KEY_ORIGIN_PATH_LEN, MAX_KEY_ORIGIN_PATH_LEN + 1] {
+            let origin = format!("012345af{}", "/0".repeat(length));
+            let expected = if length == MAX_KEY_ORIGIN_PATH_LEN {
+                Ok(length)
+            } else {
+                Err(ParseError::InvalidLength)
+            };
+            assert_eq!(
+                origin.parse::<KeyOrigin>().map(|o| o.derivation_path.len()),
+                expected
+            );
+            assert_eq!(
+                format!("[{}]{}", origin, XPUB_A)
+                    .parse::<KeyInformation>()
+                    .map(|k| k.origin_info.unwrap().derivation_path.len()),
+                expected
+            );
         }
     }
 
@@ -2923,10 +2953,7 @@ mod tests {
     #[test]
     fn test_wallet_policy_origin_path_length_limit() {
         let mut key = koi(XPUB_A);
-        key.origin_info = Some(make_key_origin_info(
-            1,
-            vec![0; MAX_BIP32_DERIVATION_PATH_LEN - 2],
-        ));
+        key.origin_info = Some(make_key_origin_info(1, vec![0; MAX_KEY_ORIGIN_PATH_LEN]));
         let policy = WalletPolicy::new("wpkh(@0/**)", vec![key.clone()]).unwrap();
         assert_eq!(
             WalletPolicy::deserialize(&mut policy.serialize().as_slice()).unwrap(),

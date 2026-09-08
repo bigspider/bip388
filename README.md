@@ -199,7 +199,7 @@ The parser and deserializer enforce explicit bounds to limit the maximum resourc
 | `MAX_PARSE_DEPTH` | 64 | descriptor / tap-tree nesting depth |
 | `MAX_DESCRIPTOR_TEMPLATE_LEN` | 4096 | template byte length in `DescriptorTemplate::from_str`, `WalletPolicy::new`, and `deserialize` |
 | `MAX_SERIALIZED_KEY_COUNT` | 999 | key-information entries in `WalletPolicy::new` and `deserialize` |
-| `MAX_BIP32_DERIVATION_PATH_LEN` | 32 | total derivation path length; policy origins are limited to 30 steps to leave room for change/address-index steps |
+| `MAX_KEY_ORIGIN_PATH_LEN` | 30 | origin steps in text parsing, policy construction, and deserialization; reserves two of the 32 path steps for change/address indices |
 
 ---
 
