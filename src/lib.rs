@@ -597,13 +597,14 @@ impl core::convert::TryFrom<&str> for KeyOrigin {
         if s.is_empty() {
             return Err(ParseError::EmptyInput);
         }
-        let parts: Vec<&str> = s.split('/').collect();
-        if parts[0].len() != 8 {
+        let mut parts = s.split('/');
+        let fingerprint_str = parts.next().ok_or(ParseError::EmptyInput)?;
+        if fingerprint_str.len() != 8 {
             return Err(ParseError::InvalidLength);
         }
-        let fingerprint = u32::from_str_radix(parts[0], 16).map_err(|_| ParseError::InvalidKey)?;
-        let derivation_path = parts[1..]
-            .iter()
+        let fingerprint =
+            u32::from_str_radix(fingerprint_str, 16).map_err(|_| ParseError::InvalidKey)?;
+        let derivation_path = parts
             .map(|x| ChildNumber::from_str(x).map_err(|_| ParseError::InvalidKey))
             .collect::<Result<Vec<ChildNumber>, Self::Error>>()?;
         Ok(KeyOrigin {
@@ -1512,7 +1513,7 @@ impl WalletPolicy {
                 }
             };
             // Deserialize pubkey.
-            let mut xpub_bytes = vec![0u8; 78];
+            let mut xpub_bytes = [0u8; 78];
             r.read_exact(&mut xpub_bytes)?;
 
             key_information.push(KeyInformation {
@@ -1921,6 +1922,9 @@ mod tests {
         }
 
         let test_cases_err = vec![
+            "",
+            "012345af/",
+            "012345af//0",
             "[01234567/0'/1'/3]",
             "0123456/0'/1'/3",
             "012345678/0'/1'/3",
