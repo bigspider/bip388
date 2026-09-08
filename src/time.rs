@@ -43,6 +43,11 @@ pub(super) fn parse_utc_date_to_timestamp(s: &str) -> Option<u32> {
         return None;
     }
     let y: i64 = dp[0].parse().ok()?;
+    // A u32 Unix timestamp falls in 1970..=2106. Reject larger years before
+    // calendar arithmetic, where an arbitrary i64 year could overflow.
+    if !(1970..=2106).contains(&y) {
+        return None;
+    }
     let m: u32 = dp[1].parse().ok()?;
     let d: u32 = dp[2].parse().ok()?;
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
@@ -215,6 +220,23 @@ mod tests {
         assert_eq!(parse_utc_date_to_timestamp("1970-01-01 00:00:60"), None); // bad second
         assert_eq!(parse_utc_date_to_timestamp("1970-01"), None); // incomplete date
         assert_eq!(parse_utc_date_to_timestamp("1970-01-01 12:00"), None); // incomplete time
+    }
+
+    #[test]
+    fn test_parse_utc_date_timestamp_bounds() {
+        assert_eq!(
+            parse_utc_date_to_timestamp("2106-02-07 06:28:15"),
+            Some(u32::MAX)
+        );
+        for date in [
+            "1969-12-31 23:59:59",
+            "2106-02-07 06:28:16",
+            "2107-01-01",
+            "9223372036854775807-01-01",
+            "9223372036854775807-03-01",
+        ] {
+            assert_eq!(parse_utc_date_to_timestamp(date), None, "{}", date);
+        }
     }
 
     // ── format_utc_date roundtrip ────────────────────────────────────────────
