@@ -38,13 +38,13 @@ const MAX_KEYS_MULTI_A: usize = 999;
 // Maximum descriptor nesting depth, including wrappers and tap-tree nodes.
 // Bounds recursion during parsing and subsequent traversal of parsed trees.
 const MAX_PARSE_DEPTH: usize = 64;
-// Maximum byte length of a serialized descriptor template accepted by
-// `WalletPolicy::deserialize`. Practical policies are far below this.
+// Maximum template byte length accepted by wallet policy construction and
+// deserialization. Practical policies are far below this.
 const MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN: usize = 4096;
-// Maximum number of key information entries accepted by `WalletPolicy::deserialize`.
+// Maximum number of key information entries accepted by a wallet policy.
 // Matches the largest multi-key fragment we can produce (`multi_a`/`sortedmulti_a`).
 const MAX_SERIALIZED_KEY_COUNT: usize = MAX_KEYS_MULTI_A;
-// Maximum length of a serialized BIP-32 derivation path.
+// Maximum BIP-32 path length, including the final change/address-index steps.
 const MAX_BIP32_DERIVATION_PATH_LEN: usize = 32;
 
 // The lists sorted by this crate are naturally small. A simple insertion sort
@@ -1371,10 +1371,26 @@ fn validate_policy(
 }
 
 impl WalletPolicy {
+    /// Constructs a policy within the same size limits as deserialization.
+    /// Returns [`ParseError::InvalidLength`] for oversized templates or key
+    /// origins, or [`ParseError::TooManyKeys`] for an oversized key vector.
     pub fn new(
         descriptor_template_str: &str,
         key_information: Vec<KeyInformation>,
     ) -> Result<Self, ParseError> {
+        if descriptor_template_str.len() > MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN {
+            return Err(ParseError::InvalidLength);
+        }
+        if key_information.len() > MAX_SERIALIZED_KEY_COUNT {
+            return Err(ParseError::TooManyKeys);
+        }
+        for key in &key_information {
+            if let Some(origin) = &key.origin_info {
+                if origin.derivation_path.len() > MAX_BIP32_DERIVATION_PATH_LEN - 2 {
+                    return Err(ParseError::InvalidLength);
+                }
+            }
+        }
         let descriptor_template = DescriptorTemplate::from_str(descriptor_template_str)?;
 
         validate_policy(&descriptor_template, &key_information)?;
@@ -2778,6 +2794,60 @@ mod tests {
                 "should be a valid policy: {template}"
             );
         }
+    }
+
+    #[test]
+    fn test_wallet_policy_template_length_limit() {
+        let base = "wsh(thresh(1,pk(@0/**)))";
+        let padding = ",0".repeat((MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN - base.len()) / 2);
+        let mut template = format!("wsh(thresh(1,pk(@0/**){}))", padding);
+        assert_eq!(template.len(), MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN);
+        let policy = WalletPolicy::new(&template, distinct_keys(1)).unwrap();
+        assert_eq!(
+            WalletPolicy::deserialize(&mut policy.serialize().as_slice()).unwrap(),
+            policy
+        );
+
+        template.push(' ');
+        assert_eq!(
+            WalletPolicy::new(&template, distinct_keys(1)),
+            Err(ParseError::InvalidLength)
+        );
+    }
+
+    #[test]
+    fn test_wallet_policy_rejects_oversized_key_count() {
+        assert_eq!(
+            WalletPolicy::new(
+                "wpkh(@0/**)",
+                vec![koi(XPUB_A); MAX_SERIALIZED_KEY_COUNT + 1]
+            ),
+            Err(ParseError::TooManyKeys)
+        );
+    }
+
+    #[test]
+    fn test_wallet_policy_origin_path_length_limit() {
+        let mut key = koi(XPUB_A);
+        key.origin_info = Some(make_key_origin_info(
+            1,
+            vec![0; MAX_BIP32_DERIVATION_PATH_LEN - 2],
+        ));
+        let policy = WalletPolicy::new("wpkh(@0/**)", vec![key.clone()]).unwrap();
+        assert_eq!(
+            WalletPolicy::deserialize(&mut policy.serialize().as_slice()).unwrap(),
+            policy
+        );
+
+        key.origin_info
+            .as_mut()
+            .unwrap()
+            .derivation_path
+            .push(ChildNumber::from(0));
+        assert_eq!(
+            WalletPolicy::new("wpkh(@0/**)", vec![key]),
+            Err(ParseError::InvalidLength)
+        );
     }
 
     #[test]
