@@ -35,9 +35,8 @@ const MAX_OLDER_AFTER: u32 = 2147483647; // maximum allowed in older/after
 const MAX_KEYS_MULTI: usize = 20;
 // Maximum key count for the Taproot `multi_a`/`sortedmulti_a` variants.
 const MAX_KEYS_MULTI_A: usize = 999;
-// Maximum recursion depth for descriptor parsing. Bounds host-provided nesting
-// (e.g. `andor(...andor(...))` or `{{{...}}}`) to keep stack usage finite on
-// the constrained VM. Well above any realistic policy depth.
+// Maximum descriptor nesting depth, including wrappers and tap-tree nodes.
+// Bounds recursion during parsing and subsequent traversal of parsed trees.
 const MAX_PARSE_DEPTH: usize = 64;
 // Maximum byte length of a serialized descriptor template accepted by
 // `WalletPolicy::deserialize`. Practical policies are far below this.
@@ -802,12 +801,9 @@ fn parse_musig_key_expression(input: &str) -> ParseResult<'_, KeyExpression> {
 
 // Parses a descriptor, optionally preceded by a wrapper prefix like "asc:".
 //
-// `depth` is the current recursion depth; it is incremented on every call and
-// rejected if it exceeds [`MAX_PARSE_DEPTH`]. This bounds stack usage on
-// untrusted input that nests descriptors arbitrarily deeply (e.g.
-// `andor(0,0,andor(0,0,...))` or `tr(@0,{{{{...}}}})`). A chain of wrapper
-// letters like `aaaa:0` does not grow recursion depth because wrappers are
-// applied iteratively in this function, not by re-entry.
+// `depth` counts enclosing descriptor and tap-tree nodes. Wrappers consume
+// depth too: although parsed iteratively, they create nested AST nodes that
+// are traversed and dropped recursively.
 fn parse_descriptor(
     input: &str,
     ctx: ParseContext,
@@ -831,9 +827,13 @@ fn parse_descriptor(
         (input, "")
     };
 
+    if wrappers.len() > MAX_PARSE_DEPTH - depth {
+        return Err(ParseError::NestingTooDeep);
+    }
+    let depth = depth + wrappers.len();
     let (input, inner) = parse_inner_descriptor(input, ctx, depth)?;
 
-    // Apply wrappers in reverse character order (rightmost char = outermost wrapper)
+    // Apply wrappers in reverse character order (leftmost char = outermost wrapper).
     let mut result = inner;
     for wrapper in wrappers.chars().rev() {
         result = match wrapper {
@@ -2425,17 +2425,29 @@ mod tests {
     }
 
     #[test]
-    fn test_parser_rejects_deeply_nested_descriptors() {
-        // Wrapper chains do NOT grow recursion depth — they are applied
-        // iteratively inside `parse_descriptor`. A long chain should still
-        // parse fine.
-        let mut s = String::new();
-        for _ in 0..1000 {
-            s.push('j');
-        }
-        s.push_str(":0");
-        assert!(DescriptorTemplate::from_str(&s).is_ok());
+    fn test_wrapper_chains_count_toward_depth_limit() {
+        for (prefix, inner, suffix, base_depth) in [
+            ("", "0", "", 1),
+            ("wsh(", "0", ")", 2),
+            ("wsh(", "and_v(v:pk(@0/**),pk(@1/**))", ")", 4),
+        ] {
+            let max_wrappers = MAX_PARSE_DEPTH - base_depth;
+            let input = format!("{}{}:{}{}", prefix, "j".repeat(max_wrappers), inner, suffix);
+            let parsed = DescriptorTemplate::from_str(&input).expect("at depth limit");
+            assert_eq!(parsed.to_string(), input);
 
+            for wrappers in [max_wrappers + 1, 1000] {
+                let input = format!("{}{}:{}{}", prefix, "j".repeat(wrappers), inner, suffix);
+                assert_eq!(
+                    DescriptorTemplate::from_str(&input),
+                    Err(ParseError::NestingTooDeep)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parser_rejects_deeply_nested_descriptors() {
         // Andor nesting recurses through `parse_descriptor` — beyond the
         // depth limit, parsing must reject without overflowing the stack.
         let mut s = String::new();
