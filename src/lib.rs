@@ -38,9 +38,9 @@ const MAX_KEYS_MULTI_A: usize = 999;
 // Maximum descriptor nesting depth, including wrappers and tap-tree nodes.
 // Bounds recursion during parsing and subsequent traversal of parsed trees.
 const MAX_PARSE_DEPTH: usize = 64;
-// Maximum template byte length accepted by wallet policy construction and
-// deserialization. Practical policies are far below this.
-const MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN: usize = 4096;
+// Maximum template byte length accepted by parsing, wallet policy construction,
+// and deserialization. Check before allocating the AST.
+const MAX_DESCRIPTOR_TEMPLATE_LEN: usize = 4096;
 // Maximum number of key information entries accepted by a wallet policy.
 // Matches the largest multi-key fragment we can produce (`multi_a`/`sortedmulti_a`).
 const MAX_SERIALIZED_KEY_COUNT: usize = MAX_KEYS_MULTI_A;
@@ -710,6 +710,9 @@ fn parse_number_up_to(input: &str, max: u32) -> ParseResult<'_, u32> {
 
 // Entry-point: parse a complete descriptor template string.
 fn parse_descriptor_template(input: &str) -> Result<DescriptorTemplate, ParseError> {
+    if input.len() > MAX_DESCRIPTOR_TEMPLATE_LEN {
+        return Err(ParseError::InvalidLength);
+    }
     let (rest, descriptor) = parse_descriptor(input, ParseContext::TopLevel, 0)?;
     if rest.is_empty() {
         Ok(descriptor)
@@ -1249,6 +1252,8 @@ fn parse_tap_tree(input: &str, depth: usize) -> ParseResult<'_, TapTree> {
 impl FromStr for DescriptorTemplate {
     type Err = ParseError;
 
+    /// Parses a template of at most 4096 bytes, returning
+    /// [`ParseError::InvalidLength`] for larger inputs before allocating the AST.
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         parse_descriptor_template(input)
     }
@@ -1378,7 +1383,7 @@ impl WalletPolicy {
         descriptor_template_str: &str,
         key_information: Vec<KeyInformation>,
     ) -> Result<Self, ParseError> {
-        if descriptor_template_str.len() > MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN {
+        if descriptor_template_str.len() > MAX_DESCRIPTOR_TEMPLATE_LEN {
             return Err(ParseError::InvalidLength);
         }
         if key_information.len() > MAX_SERIALIZED_KEY_COUNT {
@@ -1460,10 +1465,10 @@ impl WalletPolicy {
 
     pub fn deserialize<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
         // Deserialize descriptor template. Reject lengths exceeding
-        // `MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN` before allocating to prevent a hostile
+        // `MAX_DESCRIPTOR_TEMPLATE_LEN` before allocating to prevent a hostile
         // `VarInt` from triggering an unbounded allocation.
         let VarInt(desc_len) = VarInt::consensus_decode(r)?;
-        if desc_len > MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN as u64 {
+        if desc_len > MAX_DESCRIPTOR_TEMPLATE_LEN as u64 {
             return Err(encode::Error::ParseFailed("Descriptor template too long"));
         }
         let mut desc_bytes = vec![0u8; desc_len as usize];
@@ -2525,7 +2530,7 @@ mod tests {
         let mut buf = Vec::<u8>::new();
         // Encode a VarInt that exceeds the descriptor-length cap. The reader
         // must reject before allocating.
-        VarInt((MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN as u64) + 1)
+        VarInt((MAX_DESCRIPTOR_TEMPLATE_LEN as u64) + 1)
             .consensus_encode(&mut buf)
             .unwrap();
         let mut cursor = bitcoin::io::Cursor::new(buf);
@@ -2797,18 +2802,27 @@ mod tests {
     }
 
     #[test]
-    fn test_wallet_policy_template_length_limit() {
+    fn test_template_length_limit() {
         let base = "wsh(thresh(1,pk(@0/**)))";
-        let padding = ",0".repeat((MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN - base.len()) / 2);
+        let padding = ",0".repeat((MAX_DESCRIPTOR_TEMPLATE_LEN - base.len()) / 2);
         let mut template = format!("wsh(thresh(1,pk(@0/**){}))", padding);
-        assert_eq!(template.len(), MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN);
+        assert_eq!(template.len(), MAX_DESCRIPTOR_TEMPLATE_LEN);
         let policy = WalletPolicy::new(&template, distinct_keys(1)).unwrap();
+        assert_eq!(
+            &DescriptorTemplate::from_str(&template).unwrap(),
+            policy.descriptor_template()
+        );
         assert_eq!(
             WalletPolicy::deserialize(&mut policy.serialize().as_slice()).unwrap(),
             policy
         );
 
-        template.push(' ');
+        // Keep the oversized input syntactically valid by changing pk to pkh.
+        template = template.replacen("pk(", "pkh(", 1);
+        assert_eq!(
+            DescriptorTemplate::from_str(&template).map(|_| ()),
+            Err(ParseError::InvalidLength)
+        );
         assert_eq!(
             WalletPolicy::new(&template, distinct_keys(1)),
             Err(ParseError::InvalidLength)
