@@ -1326,22 +1326,31 @@ fn validate_policy(
     // used exactly. Since every referenced index is checked to be `< k`, the set
     // of referenced indices equals `{0, .., k-1}` iff it has exactly `k` members.
     let k = key_information.len();
-    let mut referenced: BTreeSet<u32> = BTreeSet::new();
+    // One bit per key: at most 125 bytes for the policy's 999-key limit.
+    let mut referenced = vec![0u8; k.div_ceil(8)];
+    let mut referenced_count = 0;
     for kp in &placeholders {
         let indices: &[u32] = match &kp.key_type {
             KeyExpressionType::PlainKey(i) => core::slice::from_ref(i),
             KeyExpressionType::Musig(indices) => indices,
         };
         for &i in indices {
-            if (i as usize) >= k {
+            let i = i as usize;
+            if i >= k {
                 return Err(ParseError::InvalidKeyIndex);
             }
-            referenced.insert(i);
+            let byte = &mut referenced[i / 8];
+            let mask = 1u8 << (i % 8);
+            if *byte & mask == 0 {
+                *byte |= mask;
+                referenced_count += 1;
+            }
         }
     }
-    if referenced.len() != k {
+    if referenced_count != k {
         return Err(ParseError::KeyIndexCountMismatch);
     }
+    drop(referenced);
 
     // B3: the public keys must be pairwise distinct, regardless of xpub
     // metadata, chain code, or origin information.
@@ -2729,6 +2738,31 @@ mod tests {
         );
         // Exactly the right keys, all used: OK.
         assert!(WalletPolicy::new("wsh(sortedmulti(2,@0/**,@1/**))", distinct_keys(2)).is_ok());
+    }
+
+    #[test]
+    fn test_policy_key_indices_across_byte_boundary() {
+        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        let root = koi(XPUB_A);
+        let keys: Vec<_> = (0..9)
+            .map(|i| KeyInformation {
+                pubkey: root
+                    .pubkey
+                    .derive_pub(&secp, &[ChildNumber::from(i)])
+                    .unwrap(),
+                origin_info: None,
+            })
+            .collect();
+        let template = "wsh(multi(2,@0/**,@1/**,@2/**,@3/**,@4/**,@5/**,@6/**,@7/**,@8/**))";
+        assert!(WalletPolicy::new(template, keys.clone()).is_ok());
+        assert_eq!(
+            WalletPolicy::new(&template.replace("@8/**", "@7/<2;3>/*"), keys.clone()),
+            Err(ParseError::KeyIndexCountMismatch)
+        );
+        assert_eq!(
+            WalletPolicy::new(&template.replace("@8/**", "@9/**"), keys),
+            Err(ParseError::InvalidKeyIndex)
+        );
     }
 
     #[test]
