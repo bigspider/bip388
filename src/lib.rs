@@ -1333,11 +1333,11 @@ fn validate_policy(
         return Err(ParseError::KeyIndexCountMismatch);
     }
 
-    // B3: the public keys must be pairwise distinct (compared as serialized
-    // xpubs; the origin info is irrelevant to key identity).
-    let mut seen_keys: BTreeSet<[u8; 78]> = BTreeSet::new();
+    // B3: the public keys must be pairwise distinct, regardless of xpub
+    // metadata, chain code, or origin information.
+    let mut seen_keys: BTreeSet<[u8; 33]> = BTreeSet::new();
     for key_info in key_information {
-        if !seen_keys.insert(key_info.pubkey.encode()) {
+        if !seen_keys.insert(key_info.pubkey.public_key.serialize()) {
             return Err(ParseError::DuplicateKey);
         }
     }
@@ -2666,6 +2666,30 @@ mod tests {
             ),
             Err(ParseError::DuplicateKey)
         );
+    }
+
+    #[test]
+    fn test_policy_rejects_duplicate_public_keys_with_different_key_information() {
+        let key = koi(XPUB_A);
+        for variant in 0..6 {
+            let mut duplicate = key.clone();
+            match variant {
+                0 => duplicate.pubkey.depth += 1,
+                1 => duplicate.pubkey.parent_fingerprint = [0; 4].into(),
+                2 => duplicate.pubkey.child_number = ChildNumber::from(0),
+                3 => duplicate.pubkey.network = bitcoin::NetworkKind::Main,
+                4 => duplicate.pubkey.chain_code = [0; 32].into(),
+                _ => duplicate.origin_info = Some(make_key_origin_info(1, vec![0])),
+            }
+            assert_ne!(key, duplicate);
+            assert_eq!(
+                WalletPolicy::new(
+                    "wsh(sortedmulti(2,@0/**,@1/**))",
+                    vec![key.clone(), duplicate]
+                ),
+                Err(ParseError::DuplicateKey)
+            );
+        }
     }
 
     #[test]
